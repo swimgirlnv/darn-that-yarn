@@ -1,0 +1,15 @@
+{
+  "include": [
+    "plug-ins",
+    "scripts",
+    "tests"
+  ],
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "scripts"
+      ]
+    }
+  ]
+}
