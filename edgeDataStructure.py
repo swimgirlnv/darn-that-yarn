@@ -1,16 +1,61 @@
 import maya.api.OpenMaya as om
 from enum import Enum
+from dataclasses import dataclass
+import maya.mel as mel
+
 
 class EdgeType(Enum):
     UNASSIGNED = 0
     COURSE = 1
     WALE = 2
     
-edge_map = {}  # key: edge index, value: EdgeType
+class StitchType(Enum):
+    NOTASSIGNED = 0
+    KNIT = 1
+    PURL = 2
+    YARNOVER = 3
+    INCREASE = 4
+    DECREASE = 5
+    
+class StitchDir(Enum):
+    UP = 0
+    DOWN = 1
+    
+@dataclass
+class FaceStitchData:
+    stitch_type: StitchType
+    stitch_dir: StitchDir
+    edge_count: int
+
+
+# face index - > stitch data
+face_stitch_map = {}
+# edge index - > EdgeType
+edge_map = {}
+
 selectedMeshes = cmds.ls(selection=True, long=True)
 base_mesh = selectedMeshes[0]
 
-def print_edges_of_selection():
+def init_stitch_face_data_structure():
+    sel = om.MGlobal.getActiveSelectionList()
+    dag, comp = sel.getComponent(0)
+    
+    mesh_fn = om.MFnMesh(dag)
+    it = om.MItMeshPolygon(dag, comp)
+    
+    while not it.isDone():
+        face_id = it.index()
+        edge_count = it.polygonVertexCount()
+    
+        face_stitch_map[face_id] = FaceStitchData(
+            StitchType.NOTASSIGNED,
+            StitchDir.UP,
+            edge_count
+        )
+    
+        it.next()
+
+def init_stitch_mesh_data_structures():
     sel = om.MGlobal.getActiveSelectionList()
 
     if sel.length() == 0:
@@ -116,6 +161,7 @@ def set_selected_edges_to_course():
             if e not in selected_edges:
                 edge_map[e] = EdgeType.WALE
 
+    draw_course_edges_as_curves()
     om.MGlobal.displayInfo("Selected edges set to COURSE and perpendicular edges set to WALE.")
 
 
@@ -200,11 +246,42 @@ def draw_course_edges_as_curves():
             cmds.setAttr(shape + ".overrideEnabled", 1)
             cmds.setAttr(shape + ".overrideRGBColors", 1)
             cmds.setAttr(shape + ".overrideColorRGB", 0, 0, 1)
+            cmds.setAttr(shape + ".lineWidth", 10)
+            cmds.setAttr(curve + ".overrideEnabled", 1)
+            cmds.setAttr(curve + ".overrideDisplayType", 1)  # 1 = Template
 
             # parent to mesh transform
             cmds.parent(curve, base_mesh)
 
             created_curves.append(curve)
+            
+        if edge_map.get(edge_id) == EdgeType.WALE:
+            v0 = edge_iter.vertexId(0)
+            v1 = edge_iter.vertexId(1)
+
+            p0 = mesh_fn.getPoint(v0, om.MSpace.kWorld)
+            p1 = mesh_fn.getPoint(v1, om.MSpace.kWorld)
+
+            curve = cmds.curve(
+                p=[(p0.x, p0.y, p0.z), (p1.x, p1.y, p1.z)],
+                d=1,
+                name=f"courseEdge_{edge_id}_crv"
+            )
+
+            # color it blue
+            shape = cmds.listRelatives(curve, shapes=True)[0]
+            cmds.setAttr(shape + ".overrideEnabled", 1)
+            cmds.setAttr(shape + ".overrideRGBColors", 1)
+            cmds.setAttr(shape + ".overrideColorRGB", 1, 0, 1)
+            cmds.setAttr(shape + ".lineWidth", 4)
+            cmds.setAttr(curve + ".overrideEnabled", 1)
+            cmds.setAttr(curve + ".overrideDisplayType", 1)  # 1 = Template
+
+            # parent to mesh transform
+            cmds.parent(curve, base_mesh)
+
+            created_curves.append(curve)
+            
 
         edge_iter.next()
 
@@ -216,6 +293,9 @@ def draw_course_edges_as_curves():
 #can you get edge by vertice?
 
 
-print_edges_of_selection()
+init_stitch_mesh_data_structures()
+init_stitch_face_data_structure()
 create_knit_gui()
+mel.eval('selectType -nurbsCurve false;')
 print(edge_map)
+print(face_stitch_map)
