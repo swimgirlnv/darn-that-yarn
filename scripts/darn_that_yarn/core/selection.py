@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import maya.cmds as cmds
 
@@ -24,7 +24,7 @@ def get_selected_faces() -> List[str]:
     return cmds.filterExpand(selectionMask=34, expand=True) or []
 
 
-def get_selection_summary() -> Dict[str, object]:
+def get_selection_summary() -> Dict[str, Any]:
     edges = get_selected_edges()
     faces = get_selected_faces()
     mesh = get_selected_mesh_transform()
