@@ -122,13 +122,14 @@ def assign_knit_to_fully_assigned_faces():
         # Get all edge indices for this face
         edge_ids = face_iter.getEdges()
 
-        # Check if all edges are assigned (not UNASSIGNED)
-        all_assigned = all(
-            edge_map.get(e, EdgeType.UNASSIGNED) != EdgeType.UNASSIGNED
-            for e in edge_ids
-        )
+        # Check if all edges are assigned (not UNASSIGNED) AND 2 Wale Edges
+        # all_assigned = all(
+        #     edge_map.get(e, EdgeType.UNASSIGNED) != EdgeType.UNASSIGNED
+        #     for e in edge_ids
+        # )
+        all_assigned = is_face_fully_assigned(dagPath, face_id)
 
-        if all_assigned:
+        if all_assigned and face_stitch_map[face_id].stitch_type == StitchType.NOTASSIGNED:
             if face_id in face_stitch_map and wale_count == 2:
                 if face_stitch_map[face_id].edge_count == 4:
                     face_data = face_stitch_map[face_id]
@@ -138,6 +139,12 @@ def assign_knit_to_fully_assigned_faces():
                     face_data = face_stitch_map[face_id]
                     face_data.stitch_type = StitchType.INCREASE
                     updated_faces.append(face_id)
+
+        # IF ANY FACES NO LONGER HAVE 2 WALE EDGES OR ARE NOT ASSIGNED, SET UNNASSIGNED
+        if not all_assigned:
+            face_data = face_stitch_map[face_id]
+            face_data.stitch_type = StitchType.NOTASSIGNED
+            updated_faces.append(face_id)
 
         face_iter.next()
 
@@ -199,6 +206,76 @@ def color_knit_faces():
     cmds.setAttr(mesh_name + ".displayColors", 1)
 
     om.MGlobal.displayInfo(f"Colored {knit_count} KNIT faces.")
+
+
+def is_face_fully_assigned(dagPath, face_id):
+    face_iter = om.MItMeshPolygon(dagPath)
+
+    try:
+        face_iter.setIndex(face_id)
+    except:
+        om.MGlobal.displayError(f"Invalid face_id: {face_id}")
+        return False
+
+    edge_ids = face_iter.getEdges()
+
+    # Check all edges assigned
+    all_assigned = all(
+        edge_map.get(e, EdgeType.UNASSIGNED) != EdgeType.UNASSIGNED
+        for e in edge_ids
+    )
+
+    # Count WALE edges
+    wale_count = sum(
+        edge_map.get(e) == EdgeType.WALE
+        for e in edge_ids
+    )
+
+    # Final condition
+    return all_assigned and wale_count == 2
+
+def set_selected_faces_stitch_type(stitch_type: StitchType):
+    sel = om.MGlobal.getActiveSelectionList()
+
+    if sel.length() == 0:
+        om.MGlobal.displayError("Select mesh faces.")
+        return
+
+    updated_faces = []
+
+    for i in range(sel.length()):
+        dagPath, component = sel.getComponent(i)
+
+        if component.isNull():
+            continue
+
+        if component.apiType() != om.MFn.kMeshPolygonComponent:
+            continue
+            
+
+        face_comp = om.MFnSingleIndexedComponent(component)
+        face_ids = face_comp.getElements()
+
+        for face_id in face_ids:
+
+            # Check if all edges are assigned (not UNASSIGNED)
+            all_assigned = is_face_fully_assigned(dagPath, face_id)
+            if (face_id in face_stitch_map) and all_assigned:
+                if (stitch_type == StitchType.PURL or stitch_type == StitchType.KNIT or stitch_type == StitchType.YARNOVER) and face_stitch_map[face_id].edge_count != 4:
+                    continue
+
+                if (stitch_type == StitchType.INCREASE or stitch_type == StitchType.DECREASE) and face_stitch_map[face_id].edge_count != 5:
+                    continue
+                face_stitch_map[face_id].stitch_type = stitch_type
+                updated_faces.append(face_id)
+
+    if updated_faces:
+        om.MGlobal.displayInfo(
+            f"Updated {len(updated_faces)} faces to {stitch_type.name}."
+        )
+        color_knit_faces()
+    else:
+        om.MGlobal.displayWarning("No valid faces were updated.")
 
 def set_selected_edges_to_course():
     sel = om.MGlobal.getActiveSelectionList()
@@ -276,9 +353,9 @@ def create_knit_gui():
     )
 
     cmds.button(
-        label="Print Edge Map",
+        label="Set Sel Faces to PURL",
         height=40,
-        command=lambda x: draw_course_edges_as_curves()
+        command=lambda x: set_selected_faces_stitch_type(StitchType.PURL)
     )
 
     cmds.showWindow(window_name)
