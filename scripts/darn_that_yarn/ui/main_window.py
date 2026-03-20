@@ -240,12 +240,12 @@ def refresh_ui_state(*_):
 
     has_mesh = mesh is not None
     has_edges = len(edges) > 0
-    has_faces = len(faces) > 0
+    has_active_faces_selected = any(f in STATE.active_faces for f in faces)
     has_any_stitch_data = len(STATE.course_edges) > 0 or len(STATE.active_faces) > 0
 
     cmds.button(UI["set_course_btn"], edit=True, enable=has_mesh and has_edges)
-    cmds.button(UI["set_stitch_btn"], edit=True, enable=has_mesh and has_faces)
-    cmds.button(UI["flip_row_btn"], edit=True, enable=has_mesh and has_faces)
+    cmds.button(UI["set_stitch_btn"], edit=True, enable=has_mesh and has_active_faces_selected)
+    cmds.button(UI["flip_row_btn"], edit=True, enable=has_mesh and has_active_faces_selected)
     cmds.button(UI["tessellate_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["generate_btn"], edit=True, enable=has_any_stitch_data)
 
