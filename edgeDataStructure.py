@@ -27,6 +27,14 @@ class FaceStitchData:
     stitch_dir: StitchDir
     edge_count: int
 
+stitch_color_map = {
+    StitchType.NOTASSIGNED: om.MColor((0.2, 0.2, 0.2)),  # dark gray
+    StitchType.KNIT:        om.MColor((0.0, 1.0, 0.0)),  # green
+    StitchType.PURL:        om.MColor((1.0, 0.0, 0.0)),  # red
+    StitchType.YARNOVER:    om.MColor((0.0, 0.5, 1.0)),  # light blue
+    StitchType.INCREASE:    om.MColor((1.0, 1.0, 0.0)),  # yellow
+    StitchType.DECREASE:    om.MColor((1.0, 0.0, 1.0)),  # magenta
+}
 
 # face index - > stitch data
 face_stitch_map = {}
@@ -84,32 +92,113 @@ def init_stitch_mesh_data_structures():
         #print(f"Edge {edge_index}: vertices ({v0}, {v1})")
 
         edge_iter.next()
-        
-def set_selected_edges_to_courseORIGINAL():
+
+def assign_knit_to_fully_assigned_faces():
+    cmds.select(base_mesh, replace=True)
     sel = om.MGlobal.getActiveSelectionList()
 
     if sel.length() == 0:
-        om.MGlobal.displayError("Select mesh edges.")
+        om.MGlobal.displayError("Select a mesh.")
         return
 
-    for i in range(sel.length()):
-        dagPath, component = sel.getComponent(i)
+    dagPath = sel.getDagPath(0)
 
-        if component.isNull():
-            continue
+    if not dagPath.hasFn(om.MFn.kMesh):
+        try:
+            dagPath.extendToShape()
+        except:
+            om.MGlobal.displayError("Selection is not a mesh.")
+            return
 
-        if component.apiType() != om.MFn.kMeshEdgeComponent:
-            om.MGlobal.displayWarning("Selection contains non-edge components.")
-            continue
+    face_iter = om.MItMeshPolygon(dagPath)
 
-        edge_comp = om.MFnSingleIndexedComponent(component)
-        edge_ids = edge_comp.getElements()
+    updated_faces = []
 
-        for edge_id in edge_ids:
-            edge_map[edge_id] = EdgeType.COURSE
-            #print(f"Edge {edge_id} set to COURSE")
+    while not face_iter.isDone():
+        face_id = face_iter.index()
+        edge_ids = face_iter.getEdges()
+        wale_count = sum(edge_map[e] == EdgeType.WALE for e in edge_ids)
 
-    om.MGlobal.displayInfo("Selected edges set to COURSE.")
+        # Get all edge indices for this face
+        edge_ids = face_iter.getEdges()
+
+        # Check if all edges are assigned (not UNASSIGNED)
+        all_assigned = all(
+            edge_map.get(e, EdgeType.UNASSIGNED) != EdgeType.UNASSIGNED
+            for e in edge_ids
+        )
+
+        if all_assigned:
+            if face_id in face_stitch_map and wale_count == 2:
+                if face_stitch_map[face_id].edge_count == 4:
+                    face_data = face_stitch_map[face_id]
+                    face_data.stitch_type = StitchType.KNIT
+                    updated_faces.append(face_id)
+                if face_stitch_map[face_id].edge_count == 5:
+                    face_data = face_stitch_map[face_id]
+                    face_data.stitch_type = StitchType.INCREASE
+                    updated_faces.append(face_id)
+
+        face_iter.next()
+
+    om.MGlobal.displayInfo(f"{len(updated_faces)} faces set to KNIT.")
+    color_knit_faces()
+
+def color_knit_faces():
+    sel = om.MGlobal.getActiveSelectionList()
+
+    if sel.length() == 0:
+        om.MGlobal.displayError("Select a mesh.")
+        return
+
+    dagPath = sel.getDagPath(0)
+
+    # mesh shape
+    if not dagPath.hasFn(om.MFn.kMesh):
+        try:
+            dagPath.extendToShape()
+        except:
+            om.MGlobal.displayError("Selection is not a mesh.")
+            return
+
+    if not dagPath.hasFn(om.MFn.kMesh):
+        om.MGlobal.displayError("Selection is not a mesh shape.")
+        return
+
+    mesh_fn = om.MFnMesh(dagPath)
+    face_iter = om.MItMeshPolygon(dagPath)
+
+    colors = []
+    face_ids = []
+    vert_ids = []
+
+    knit_count = 0
+
+    while not face_iter.isDone():
+        face_id = face_iter.index()
+
+        if face_id in face_stitch_map:
+            vertex_indices = face_iter.getVertices()
+
+            for v_id in vertex_indices:
+                colors.append(stitch_color_map[face_stitch_map[face_id].stitch_type]) 
+                face_ids.append(face_id)
+                vert_ids.append(v_id)
+                
+            if face_stitch_map[face_id].stitch_type != StitchType.NOTASSIGNED:
+                knit_count += 1
+
+        face_iter.next()
+
+    if colors:
+        mesh_fn.setFaceVertexColors(colors, face_ids, vert_ids)
+
+    # Enable display of vertex colors
+    import maya.cmds as cmds
+    mesh_name = dagPath.fullPathName()
+    cmds.setAttr(mesh_name + ".displayColors", 1)
+
+    om.MGlobal.displayInfo(f"Colored {knit_count} KNIT faces.")
 
 def set_selected_edges_to_course():
     sel = om.MGlobal.getActiveSelectionList()
@@ -163,6 +252,7 @@ def set_selected_edges_to_course():
 
     draw_course_edges_as_curves()
     om.MGlobal.displayInfo("Selected edges set to COURSE and perpendicular edges set to WALE.")
+
 
 
 def print_edge_map():
@@ -286,6 +376,7 @@ def draw_course_edges_as_curves():
         edge_iter.next()
 
     om.MGlobal.displayInfo(f"Created {len(created_curves)} COURSE edge curves.")
+    assign_knit_to_fully_assigned_faces()
 
 #function to set selected edge loop as all course edges and to set perpendicular edges with verts in edge loop as wale
 
