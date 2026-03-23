@@ -16,6 +16,9 @@ class StitchToolState:
     preview_mesh: Optional[str] = None
     original_mesh_snapshot: Optional[str] = None
     is_tessellated: bool = False
+    face_stitch_map = {}
+    edge_map = {}
+    base_mesh = None
 
     def reset(self):
         self.course_edges.clear()
@@ -29,6 +32,8 @@ class StitchToolState:
         self.preview_mesh = None
         self.original_mesh_snapshot = None
         self.is_tessellated = False
+        self.face_stitch_map = {}
+        self.edge_map = {}
 
 
 STATE = StitchToolState()

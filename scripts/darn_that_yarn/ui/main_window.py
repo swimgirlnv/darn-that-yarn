@@ -10,6 +10,13 @@ from darn_that_yarn.commands.stitch_commands import (
     restore_stitch_mesh,
     generate_knit_mesh,
     reset_stitch_mesh,
+    init_stitch_face_data_structure,
+    init_stitch_mesh_data_structures,
+    draw_course_edges_as_curves,
+    set_selected_edges_to_course,
+    are_selected_faces_active,
+    set_selected_faces_stitch_type,
+    StitchType
 )
 
 WINDOW_NAME = "DarnThatYarnWindow"
@@ -18,6 +25,12 @@ WORKSPACE_NAME = "DarnThatYarnWorkspaceControl"
 _SCRIPT_JOB_IDS = []
 
 UI = {}
+
+stitch_name_to_type_map = { "knit": StitchType.KNIT,
+                            "purl": StitchType.PURL,
+                            "yarn-over": StitchType.YARNOVER,
+                            "increase": StitchType.INCREASE,
+                            "decrease": StitchType.DECREASE}
 
 
 def _safe_delete_script_jobs():
@@ -40,28 +53,31 @@ def close_darn_that_yarn_ui():
 
 
 def show_darn_that_yarn_ui():
-    close_darn_that_yarn_ui()
-
-    cmds.workspaceControl(
-        WORKSPACE_NAME,
-        label="Darn that Yarn!",
-        retain=False,
-        floating=True,
-        initialWidth=360,
-        initialHeight=620
-    )
-
-    content = cmds.columnLayout(adj=True, parent=WORKSPACE_NAME)
-    _build_ui(content)
-    _register_script_jobs()
-    refresh_ui_state()
-
     mesh = get_selected_mesh_transform()
     if mesh:
         STATE.selected_mesh = mesh
         _set_status(f"Ready. Mesh selected: {mesh}")
+        close_darn_that_yarn_ui()
+        print("show_darn_that_yarn_ui CALLED")
+
+        cmds.workspaceControl(
+            WORKSPACE_NAME,
+            label="Darn that Yarn!",
+            retain=False,
+            floating=True,
+            initialWidth=360,
+            initialHeight=620
+        )
+
+        content = cmds.columnLayout(adj=True, parent=WORKSPACE_NAME)
+        _build_ui(content)
+        _register_script_jobs()
+        init_stitch_mesh_data_structures()
+        init_stitch_face_data_structure()
+        draw_course_edges_as_curves()
+        refresh_ui_state()
     else:
-        _set_status("Select one polygon mesh to begin.")
+        show_no_mesh_selected_warning()
 
 
 def _build_ui(parent):
@@ -97,7 +113,7 @@ def _build_ui(parent):
     )
     UI["set_course_btn"] = cmds.button(
         label="Set Course Edge Loop",
-        command=lambda *_: _handle_set_course_edges(),
+        command=lambda *_: set_selected_edges_to_course(),
         enable=False,
         height=32
     )
@@ -226,14 +242,14 @@ def _set_status(message: str):
 
 
 def refresh_ui_state(*_):
+    print("REFRESH UI CALLED!")
     info = get_selection_summary()
 
     edges = info["edges"]
     faces = info["faces"]
-    mesh = info["mesh"]
 
-    if mesh:
-        STATE.selected_mesh = mesh
+    mesh = STATE.selected_mesh
+    _set_status(f"Active mesh: {mesh}")
 
     cmds.text(
         UI["selected_edges_label"],
@@ -246,23 +262,25 @@ def refresh_ui_state(*_):
         label=f"Selected Faces: {len(faces)}"
     )
 
-    has_mesh = mesh is not None
     has_edges = len(edges) > 0
-    has_active_faces_selected = any(f in STATE.active_faces for f in faces)
+    has_faces = len(faces) > 0
+    has_active_faces_selected = are_selected_faces_active()
     has_any_stitch_data = len(STATE.course_edges) > 0 or len(STATE.active_faces) > 0
 
-    cmds.button(UI["set_course_btn"], edit=True, enable=has_mesh and has_edges)
-    cmds.button(UI["set_stitch_btn"], edit=True, enable=has_mesh and has_active_faces_selected)
-    cmds.button(UI["flip_row_btn"], edit=True, enable=has_mesh and has_active_faces_selected)
+    cmds.button(UI["set_course_btn"], edit=True, enable=has_edges)
+    cmds.button(UI["set_stitch_btn"], edit=True, enable=has_faces and has_active_faces_selected)
+    cmds.button(UI["flip_row_btn"], edit=True, enable=has_faces and has_active_faces_selected)
     cmds.button(UI["tessellate_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["restore_btn"], edit=True, enable=STATE.is_tessellated)
     cmds.button(UI["generate_btn"], edit=True, enable=has_any_stitch_data)
 
-    if not has_mesh:
-        _set_status("Select exactly one polygon mesh.")
-    else:
-        _set_status(f"Active mesh: {mesh}")
-
+def show_no_mesh_selected_warning():
+    cmds.confirmDialog(
+            title='Warning',
+            message='Must have object selected',
+            button=['Confirm'],
+            defaultButton='Confirm'
+        )
 
 def _handle_set_course_edges():
     edges = get_selection_summary()["edges"]
@@ -272,8 +290,8 @@ def _handle_set_course_edges():
 
 def _handle_set_stitch_type():
     faces = get_selection_summary()["faces"]
-    stitch_type = cmds.optionMenu(UI["stitch_type_menu"], query=True, value=True)
-    set_stitch_type(faces, stitch_type)
+    stitch_name = cmds.optionMenu(UI["stitch_type_menu"], query=True, value=True)
+    set_selected_faces_stitch_type(stitch_name_to_type_map[stitch_name])
     refresh_ui_state()
 
 
@@ -308,4 +326,7 @@ def _handle_generate():
 
 def _handle_reset():
     reset_stitch_mesh()
+    init_stitch_face_data_structure()
+    init_stitch_mesh_data_structures()
+    draw_course_edges_as_curves()
     refresh_ui_state()
