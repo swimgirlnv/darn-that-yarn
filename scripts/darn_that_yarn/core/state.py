@@ -15,6 +15,9 @@ class StitchToolState:
     yarn_relaxation_enabled: bool = True
     preview_mesh: Optional[str] = None
     original_mesh_snapshot: Optional[str] = None
+    face_stitch_map = {}
+    edge_map = {}
+    base_mesh = None
 
     def reset(self):
         self.course_edges.clear()
@@ -27,6 +30,8 @@ class StitchToolState:
         self.yarn_relaxation_enabled = True
         self.preview_mesh = None
         self.original_mesh_snapshot = None
+        self.face_stitch_map = {}
+        self.edge_map = {}
 
 
 STATE = StitchToolState()
