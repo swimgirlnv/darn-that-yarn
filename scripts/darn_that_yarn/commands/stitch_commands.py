@@ -64,14 +64,72 @@ def flip_row_direction(selected_faces):
 
 def tessellate_stitch_mesh(level):
     """
-    Placeholder for Rebecca's tessellation task.
+    Subdivides all stitch faces on the selected mesh by the given tessellation level.
+    The original mesh is hidden but preserved so it can be restored. A duplicate
+    (the tessellated preview) is shown in the viewport. Re-calling with a new level
+    replaces the previous preview without touching the original.
     """
+    if not STATE.selected_mesh:
+        cmds.warning("No mesh selected. Select a polygon mesh first.")
+        return
+
+    if not cmds.objExists(STATE.selected_mesh):
+        cmds.warning(f"Mesh '{STATE.selected_mesh}' no longer exists.")
+        return
+
+    # Clean up any existing preview before creating a new one.
+    if STATE.preview_mesh and cmds.objExists(STATE.preview_mesh):
+        cmds.delete(STATE.preview_mesh)
+        STATE.preview_mesh = None
+
+    # Ensure the original is visible before duplicating so the duplicate inherits
+    # the correct visibility state.
+    cmds.showHidden(STATE.selected_mesh)
+
+    duplicates = cmds.duplicate(STATE.selected_mesh, returnRootsOnly=True)
+    preview = cmds.rename(duplicates[0], STATE.selected_mesh + "_tess_preview")
+    STATE.preview_mesh = preview
+
+    # Subdivide all faces of the preview mesh.
+    face_count = cmds.polyEvaluate(preview, face=True)
+    all_faces = [f"{preview}.f[{i}]" for i in range(face_count)]
+    # mode=1 (linear) so each edge is split into `level` segments, giving
+    # predictable row counts that match the slider value directly.
+    cmds.polySubdivideFacet(all_faces, divisions=level, mode=1)
+
+    # Hide the original; the tessellated preview becomes the viewport representation.
+    cmds.hide(STATE.selected_mesh)
+
     STATE.tessellation_level = level
+    STATE.is_tessellated = True
+
     cmds.inViewMessage(
-        amg=f"Preview tessellation level set to <hl>{level}</hl>.",
+        amg=f"Tessellated stitch mesh at level <hl>{level}</hl>.",
         pos="topCenter",
         fade=True
     )
+
+
+def restore_stitch_mesh():
+    """
+    Removes the tessellated preview and shows the original un-tessellated mesh.
+    Safe to call even if no tessellation has been applied.
+    """
+    if STATE.preview_mesh and cmds.objExists(STATE.preview_mesh):
+        cmds.delete(STATE.preview_mesh)
+
+    STATE.preview_mesh = None
+    STATE.is_tessellated = False
+
+    if STATE.selected_mesh and cmds.objExists(STATE.selected_mesh):
+        cmds.showHidden(STATE.selected_mesh)
+        cmds.inViewMessage(
+            amg="Restored original stitch mesh.",
+            pos="topCenter",
+            fade=True
+        )
+    else:
+        cmds.warning("Original mesh not found; nothing to restore.")
 
 
 def generate_knit_mesh():

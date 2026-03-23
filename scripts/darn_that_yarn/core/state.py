@@ -15,6 +15,7 @@ class StitchToolState:
     yarn_relaxation_enabled: bool = True
     preview_mesh: Optional[str] = None
     original_mesh_snapshot: Optional[str] = None
+    is_tessellated: bool = False
 
     def reset(self):
         self.course_edges.clear()
@@ -27,6 +28,7 @@ class StitchToolState:
         self.yarn_relaxation_enabled = True
         self.preview_mesh = None
         self.original_mesh_snapshot = None
+        self.is_tessellated = False
 
 
 STATE = StitchToolState()

@@ -7,6 +7,7 @@ from darn_that_yarn.commands.stitch_commands import (
     set_stitch_type,
     flip_row_direction,
     tessellate_stitch_mesh,
+    restore_stitch_mesh,
     generate_knit_mesh,
     reset_stitch_mesh,
 )
@@ -163,6 +164,13 @@ def _build_ui(parent):
         height=32
     )
 
+    UI["restore_btn"] = cmds.button(
+        label="Restore Original Mesh",
+        command=lambda *_: _handle_restore_mesh(),
+        enable=False,
+        height=32
+    )
+
     UI["mesh_relax_cb"] = cmds.checkBox(
         label="Stitch Mesh Relaxation",
         value=True,
@@ -247,6 +255,7 @@ def refresh_ui_state(*_):
     cmds.button(UI["set_stitch_btn"], edit=True, enable=has_mesh and has_active_faces_selected)
     cmds.button(UI["flip_row_btn"], edit=True, enable=has_mesh and has_active_faces_selected)
     cmds.button(UI["tessellate_btn"], edit=True, enable=has_any_stitch_data)
+    cmds.button(UI["restore_btn"], edit=True, enable=STATE.is_tessellated)
     cmds.button(UI["generate_btn"], edit=True, enable=has_any_stitch_data)
 
     if not has_mesh:
@@ -277,6 +286,11 @@ def _handle_flip_row_direction():
 def _handle_tessellate():
     level = cmds.intSliderGrp(UI["tessellation_slider"], query=True, value=True)
     tessellate_stitch_mesh(level)
+    refresh_ui_state()
+
+
+def _handle_restore_mesh():
+    restore_stitch_mesh()
     refresh_ui_state()
 
 
