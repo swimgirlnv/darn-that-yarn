@@ -15,6 +15,7 @@ class StitchToolState:
     yarn_relaxation_enabled: bool = True
     preview_mesh: Optional[str] = None
     original_mesh_snapshot: Optional[str] = None
+    is_tessellated: bool = False
     face_stitch_map = {}
     edge_map = {}
     base_mesh = None
@@ -30,6 +31,7 @@ class StitchToolState:
         self.yarn_relaxation_enabled = True
         self.preview_mesh = None
         self.original_mesh_snapshot = None
+        self.is_tessellated = False
         self.face_stitch_map = {}
         self.edge_map = {}
 
