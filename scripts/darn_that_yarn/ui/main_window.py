@@ -17,6 +17,8 @@ from darn_that_yarn.commands.stitch_commands import (
     are_selected_faces_active,
     set_selected_faces_stitch_type,
     apply_pattern_fill,
+    get_selected_faces_edge_num,
+    flip_selected_faces_stitch_type,
     StitchType
 )
 
@@ -70,6 +72,8 @@ def show_darn_that_yarn_ui():
     _register_script_jobs()
 
     mesh = get_selected_mesh_transform()
+    # prevent user from selecting curves that display changes to stitches and edges
+    mel.eval('selectType -nurbsCurve false;')
     if mesh:
         _activate_mesh(mesh)
     else:
@@ -153,11 +157,11 @@ def _build_ui(parent):
     )
 
     UI["flip_row_btn"] = cmds.button(
-        label="Flip Row Direction",
+        label="Flip Selected Stitches",
         command=lambda *_: _handle_flip_row_direction(),
         enable=False,
         height=32,
-        annotation="Flips the knit direction for all stitches in the selected faces' row."
+        annotation="Flips the knit direction for all stitches in the selected faces."
     )
 
     cmds.separator(height=8, style="none")
@@ -322,6 +326,20 @@ def refresh_ui_state(*_):
         or any(v.name == "COURSE" for v in STATE.edge_map.values())
     )
 
+    # only display possible stitch types by edge number in dropdown
+    sel_faces_num_edges = get_selected_faces_edge_num()
+    items = cmds.optionMenu(UI["stitch_type_menu"], query=True, itemListLong=True) or []
+    for item in items:
+        cmds.deleteUI(item)
+    if sel_faces_num_edges == 5:
+        stitch_types = ["increase", "decrease"]
+    elif sel_faces_num_edges == 4:
+        stitch_types = ["knit", "purl", "yarn-over"]
+    else:
+        stitch_types = []
+    for stitch_type in stitch_types:
+        cmds.menuItem(label=stitch_type, parent=UI["stitch_type_menu"])
+
     cmds.button(UI["set_course_btn"], edit=True, enable=has_edges)
     cmds.button(UI["set_stitch_btn"], edit=True, enable=has_faces and has_active_faces_selected)
     cmds.button(UI["flip_row_btn"], edit=True, enable=has_faces and has_active_faces_selected)
@@ -361,7 +379,7 @@ def _handle_set_stitch_type():
 
 def _handle_flip_row_direction():
     faces = get_selection_summary()["faces"]
-    flip_row_direction(faces)
+    flip_selected_faces_stitch_type()
     refresh_ui_state()
 
 
