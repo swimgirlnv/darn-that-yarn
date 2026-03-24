@@ -135,12 +135,6 @@ stitch_color_map = {
     StitchType.DECREASE:    om.MColor((1.0, 0.0, 1.0)),  # magenta
 }
 
-#MOVED TO STATE
-# # face index to stitch data
-# face_stitch_map = {}
-# # edge index to EdgeType
-# edge_map = {}
-
 
 def init_stitch_face_data_structure():
     sel = om.MGlobal.getActiveSelectionList()
@@ -189,8 +183,6 @@ def init_stitch_mesh_data_structures():
         
         STATE.edge_map[edge_index] = EdgeType.UNASSIGNED
 
-        #print(f"Edge {edge_index}: vertices ({v0}, {v1})")
-
         edge_iter.next()
 
 def assign_knit_to_fully_assigned_faces():
@@ -223,10 +215,6 @@ def assign_knit_to_fully_assigned_faces():
         edge_ids = face_iter.getEdges()
 
         # Check if all edges are assigned (not UNASSIGNED) AND 2 Wale Edges
-        # all_assigned = all(
-        #     STATE.edge_map.get(e, EdgeType.UNASSIGNED) != EdgeType.UNASSIGNED
-        #     for e in edge_ids
-        # )
         all_assigned = is_face_fully_assigned(dagPath, face_id)
 
         if all_assigned and STATE.face_stitch_map[face_id].stitch_type == StitchType.NOTASSIGNED:
