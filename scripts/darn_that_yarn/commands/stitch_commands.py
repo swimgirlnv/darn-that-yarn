@@ -717,6 +717,8 @@ def apply_pattern_fill(pattern_type="checker"):
     for face_id, (row, col) in face_coords.items():
         if face_id not in STATE.face_stitch_map:
             continue
+        if not is_face_fully_assigned(dagPath, face_id):
+            continue
         if STATE.face_stitch_map[face_id].edge_count != 4:
             continue  # increase/decrease faces (5-sided) keep their type
 
