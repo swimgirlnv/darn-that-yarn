@@ -193,12 +193,6 @@ stitch_color_map = {
     StitchType.DECREASE:    om.MColor((0.68, 0.35, 0.65)),  # soft plum
 }
 
-#MOVED TO STATE
-# # face index to stitch data
-# face_stitch_map = {}
-# # edge index to EdgeType
-# edge_map = {}
-
 
 def init_stitch_face_data_structure():
     sel = om.MGlobal.getActiveSelectionList()
@@ -281,10 +275,6 @@ def assign_knit_to_fully_assigned_faces():
         edge_ids = face_iter.getEdges()
 
         # Check if all edges are assigned (not UNASSIGNED) AND 2 Wale Edges
-        # all_assigned = all(
-        #     STATE.edge_map.get(e, EdgeType.UNASSIGNED) != EdgeType.UNASSIGNED
-        #     for e in edge_ids
-        # )
         all_assigned = is_face_fully_assigned(dagPath, face_id)
 
         if all_assigned and STATE.face_stitch_map[face_id].stitch_type == StitchType.NOTASSIGNED:
@@ -415,6 +405,32 @@ def are_selected_faces_active():
                 return False
     return True
 
+def get_selected_faces_edge_num():
+    selected_faces_edgecount = -1
+    sel = om.MGlobal.getActiveSelectionList()
+
+    for i in range(sel.length()):
+        dagPath, component = sel.getComponent(i)
+
+        if component.isNull():
+            continue
+
+        if component.apiType() != om.MFn.kMeshPolygonComponent:
+            continue
+            
+
+        face_comp = om.MFnSingleIndexedComponent(component)
+        face_ids = face_comp.getElements()
+
+        for face_id in face_ids:
+
+            # Check if this face has same number of edges as other selected faces
+            if selected_faces_edgecount == -1:
+                selected_faces_edgecount = STATE.face_stitch_map[face_id].edge_count
+            elif selected_faces_edgecount != STATE.face_stitch_map[face_id].edge_count:
+                return -1
+    return selected_faces_edgecount
+
 def set_selected_faces_stitch_type(stitch_type: StitchType):
     sel = om.MGlobal.getActiveSelectionList()
 
@@ -453,6 +469,51 @@ def set_selected_faces_stitch_type(stitch_type: StitchType):
     if updated_faces:
         om.MGlobal.displayInfo(
             f"Updated {len(updated_faces)} faces to {stitch_type.name}."
+        )
+        color_knit_faces()
+    else:
+        om.MGlobal.displayWarning("No valid faces were updated.")
+
+def flip_selected_faces_stitch_type():
+    sel = om.MGlobal.getActiveSelectionList()
+
+    if sel.length() == 0:
+        om.MGlobal.displayError("Select mesh faces.")
+        return
+
+    updated_faces = []
+
+    for i in range(sel.length()):
+        dagPath, component = sel.getComponent(i)
+
+        if component.isNull():
+            continue
+
+        if component.apiType() != om.MFn.kMeshPolygonComponent:
+            continue
+            
+
+        face_comp = om.MFnSingleIndexedComponent(component)
+        face_ids = face_comp.getElements()
+
+        for face_id in face_ids:
+
+            # Check if all edges are assigned (not UNASSIGNED)
+            all_assigned = is_face_fully_assigned(dagPath, face_id)
+            if (face_id in STATE.face_stitch_map) and all_assigned:
+
+                if STATE.face_stitch_map[face_id].stitch_type == StitchType.YARNOVER: continue
+
+                #flip to opposite direction stitch type
+                if STATE.face_stitch_map[face_id].stitch_type == StitchType.INCREASE : STATE.face_stitch_map[face_id].stitch_type = StitchType.DECREASE
+                elif STATE.face_stitch_map[face_id].stitch_type == StitchType.DECREASE : STATE.face_stitch_map[face_id].stitch_type = StitchType.INCREASE
+                elif STATE.face_stitch_map[face_id].stitch_type == StitchType.KNIT : STATE.face_stitch_map[face_id].stitch_type = StitchType.PURL
+                elif STATE.face_stitch_map[face_id].stitch_type == StitchType.PURL : STATE.face_stitch_map[face_id].stitch_type = StitchType.KNIT
+                updated_faces.append(face_id)
+
+    if updated_faces:
+        om.MGlobal.displayInfo(
+            f"Flipped {len(updated_faces)} faces."
         )
         color_knit_faces()
     else:
@@ -627,14 +688,21 @@ def create_knit_gui():
 
     cmds.showWindow(window_name)
 
-def draw_course_edges_as_curves():
-    
-    #Delete curves already parented to base mesh
-    curves = cmds.listRelatives(STATE.base_mesh, allDescendents=True, type="nurbsCurve", fullPath=True) or []
-    curve_transforms = cmds.listRelatives(curves, parent=True, fullPath=True) or []
-    if curve_transforms:
-                cmds.delete(list(set(curve_transforms)))
-                
+def draw_course_edges_as_curves(offset=0.0):
+    mel.eval('selectType -nurbsCurve false;')
+    debug_grp = "edge_type_indicator_grp"
+
+    # Create group if it doesn't exist
+    if not cmds.objExists(debug_grp):
+        debug_grp = cmds.group(empty=True, name=debug_grp)
+    else:
+        # Delete existing curves under the group
+        children = cmds.listRelatives(debug_grp, allDescendents=True, fullPath=True) or []
+        curve_shapes = cmds.ls(children, type="nurbsCurve", long=True) or []
+        curve_transforms = cmds.listRelatives(curve_shapes, parent=True, fullPath=True) or []
+        if curve_transforms:
+            cmds.delete(list(set(curve_transforms)))
+
     cmds.select(STATE.base_mesh, replace=True)
     
     sel = om.MGlobal.getActiveSelectionList()
@@ -653,71 +721,60 @@ def draw_course_edges_as_curves():
             return
 
     mesh_fn = om.MFnMesh(dagPath)
-    mesh_name = dagPath.partialPathName()
-
     edge_iter = om.MItMeshEdge(dagPath)
 
     created_curves = []
 
     while not edge_iter.isDone():
         edge_id = edge_iter.index()
+        edge_type = STATE.edge_map.get(edge_id)
 
-        if STATE.edge_map.get(edge_id) == EdgeType.COURSE:
-            v0 = edge_iter.vertexId(0)
-            v1 = edge_iter.vertexId(1)
+        if edge_type not in [EdgeType.COURSE, EdgeType.WALE]:
+            edge_iter.next()
+            continue
 
-            p0 = mesh_fn.getPoint(v0, om.MSpace.kWorld)
-            p1 = mesh_fn.getPoint(v1, om.MSpace.kWorld)
+        v0 = edge_iter.vertexId(0)
+        v1 = edge_iter.vertexId(1)
 
-            curve = cmds.curve(
-                p=[(p0.x, p0.y, p0.z), (p1.x, p1.y, p1.z)],
-                d=1,
-                name=f"courseEdge_{edge_id}_crv"
-            )
+        p0 = mesh_fn.getPoint(v0, om.MSpace.kWorld)
+        p1 = mesh_fn.getPoint(v1, om.MSpace.kWorld)
 
-            # teal for course edges
-            shape = cmds.listRelatives(curve, shapes=True)[0]
-            cmds.setAttr(shape + ".overrideEnabled", 1)
-            cmds.setAttr(shape + ".overrideRGBColors", 1)
+        n0 = mesh_fn.getVertexNormal(v0, True, om.MSpace.kWorld)
+        n1 = mesh_fn.getVertexNormal(v1, True, om.MSpace.kWorld)
+
+        # Offset
+        p0_offset = p0 + (n0 * offset)
+        p1_offset = p1 + (n1 * offset)
+
+        curve = cmds.curve(
+            p=[(p0_offset.x, p0_offset.y, p0_offset.z),
+               (p1_offset.x, p1_offset.y, p1_offset.z)],
+            d=1,
+            name=f"edge_{edge_id}_crv"
+        )
+
+        shape = cmds.listRelatives(curve, shapes=True)[0]
+        cmds.setAttr(shape + ".overrideEnabled", 1)
+        cmds.setAttr(shape + ".overrideRGBColors", 1)
+
+        if edge_type == EdgeType.COURSE:
             cmds.setAttr(shape + ".overrideColorRGB", 0.18, 0.65, 0.72)
             cmds.setAttr(shape + ".lineWidth", 10)
-            cmds.setAttr(curve + ".overrideEnabled", 1)
-            cmds.setAttr(curve + ".overrideDisplayType", 1)  # 1 = Template
 
-            # parent to mesh transform
-            cmds.parent(curve, STATE.base_mesh)
-
-            created_curves.append(curve)
-            
-        if STATE.edge_map.get(edge_id) == EdgeType.WALE:
-            v0 = edge_iter.vertexId(0)
-            v1 = edge_iter.vertexId(1)
-
-            p0 = mesh_fn.getPoint(v0, om.MSpace.kWorld)
-            p1 = mesh_fn.getPoint(v1, om.MSpace.kWorld)
-
-            curve = cmds.curve(
-                p=[(p0.x, p0.y, p0.z), (p1.x, p1.y, p1.z)],
-                d=1,
-                name=f"courseEdge_{edge_id}_crv"
-            )
-
-            # lavender for wale edges
-            shape = cmds.listRelatives(curve, shapes=True)[0]
-            cmds.setAttr(shape + ".overrideEnabled", 1)
-            cmds.setAttr(shape + ".overrideRGBColors", 1)
+        elif edge_type == EdgeType.WALE:
             cmds.setAttr(shape + ".overrideColorRGB", 0.62, 0.45, 0.78)
             cmds.setAttr(shape + ".lineWidth", 4)
-            cmds.setAttr(curve + ".overrideEnabled", 1)
-            cmds.setAttr(curve + ".overrideDisplayType", 1)  # 1 = Template
 
-            # parent to mesh transform
-            cmds.parent(curve, STATE.base_mesh)
+        # Make curves unselectable
+        cmds.setAttr(curve + ".overrideEnabled", 1)
+        cmds.setAttr(curve + ".overrideDisplayType", 2)  # Reference
 
-            created_curves.append(curve)
-            
+        # Parent to debug group instead of mesh
+        cmds.parent(curve, debug_grp)
+
+        created_curves.append(curve)
 
         edge_iter.next()
 
-    om.MGlobal.displayInfo(f"Created {len(created_curves)} COURSE edge curves.")
+    om.MGlobal.displayInfo(f"Created {len(created_curves)} edge curves.")
     assign_knit_to_fully_assigned_faces()
