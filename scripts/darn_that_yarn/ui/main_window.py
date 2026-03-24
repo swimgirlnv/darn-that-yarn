@@ -1,4 +1,5 @@
 import maya.cmds as cmds
+import maya.mel as mel
 
 from darn_that_yarn.core.selection import get_selection_summary, get_selected_mesh_transform
 from darn_that_yarn.core.state import STATE
