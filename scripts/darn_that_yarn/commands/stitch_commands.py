@@ -66,6 +66,68 @@ def flip_row_direction(selected_faces):
     )
 
 
+def _color_preview_mesh_from_base():
+    """
+    Colors the tessellated preview mesh by projecting each preview face centroid
+    onto the base mesh to inherit the original face's stitch type color.
+    """
+    if not STATE.preview_mesh or not cmds.objExists(STATE.preview_mesh):
+        return
+    if not STATE.base_mesh or not cmds.objExists(STATE.base_mesh):
+        return
+    if not STATE.face_stitch_map:
+        return
+
+    # Build dag paths directly — avoids triggering SelectionChanged script jobs.
+    preview_sel = om.MSelectionList()
+    preview_sel.add(STATE.preview_mesh)
+    preview_dag = preview_sel.getDagPath(0)
+    if not preview_dag.hasFn(om.MFn.kMesh):
+        preview_dag.extendToShape()
+
+    base_sel = om.MSelectionList()
+    base_sel.add(STATE.base_mesh)
+    base_dag = base_sel.getDagPath(0)
+    if not base_dag.hasFn(om.MFn.kMesh):
+        base_dag.extendToShape()
+
+    preview_fn = om.MFnMesh(preview_dag)
+    base_fn = om.MFnMesh(base_dag)
+
+    face_iter = om.MItMeshPolygon(preview_dag)
+    colors = []
+    face_ids = []
+    vert_ids = []
+
+    while not face_iter.isDone():
+        face_id = face_iter.index()
+        # center() is unstable on freshly-tessellated meshes in Maya 2025 API 2.0;
+        # compute centroid manually from vertex positions instead.
+        verts = face_iter.getVertices()
+        cx = cy = cz = 0.0
+        for v in verts:
+            p = preview_fn.getPoint(v, om.MSpace.kWorld)
+            cx += p.x; cy += p.y; cz += p.z
+        centroid = om.MPoint(cx / len(verts), cy / len(verts), cz / len(verts))
+        _, base_face_id = base_fn.getClosestPoint(centroid, om.MSpace.kWorld)
+        face_data = STATE.face_stitch_map.get(base_face_id)
+        color = (
+            stitch_color_map[face_data.stitch_type]
+            if face_data
+            else stitch_color_map[StitchType.NOTASSIGNED]
+        )
+        for v_id in face_iter.getVertices():
+            colors.append(color)
+            face_ids.append(face_id)
+            vert_ids.append(v_id)
+        face_iter.next()
+
+    if colors:
+        preview_fn.setFaceVertexColors(colors, face_ids, vert_ids)
+
+    cmds.setAttr(preview_dag.fullPathName() + ".displayColors", 1)
+
+
 def tessellate_stitch_mesh(level):
     """
     Subdivides all stitch faces on the selected mesh by the given tessellation level.
@@ -95,20 +157,23 @@ def tessellate_stitch_mesh(level):
     STATE.preview_mesh = preview
 
     # Subdivide all faces of the preview mesh.
+    # mode=1 (linear): divisions=N splits each edge into N segments → N×N faces per quad.
+    # We use level+1 so level=1 gives 2×2=4 stitch faces (minimum meaningful tessellation).
     face_count = cmds.polyEvaluate(preview, face=True)
     all_faces = [f"{preview}.f[{i}]" for i in range(face_count)]
-    # mode=1 (linear) so each edge is split into `level` segments, giving
-    # predictable row counts that match the slider value directly.
-    cmds.polySubdivideFacet(all_faces, divisions=level, mode=1)
-
-    # Hide the original; the tessellated preview becomes the viewport representation.
-    cmds.hide(STATE.selected_mesh)
+    cmds.polySubdivideFacet(all_faces, divisions=level + 1, mode=0)
 
     STATE.tessellation_level = level
     STATE.is_tessellated = True
 
+    # Color the preview before hiding the base — getClosestPoint needs the base visible.
+    _color_preview_mesh_from_base()
+
+    # Hide the original; the tessellated preview becomes the viewport representation.
+    cmds.hide(STATE.selected_mesh)
+
     cmds.inViewMessage(
-        amg=f"Tessellated stitch mesh at level <hl>{level}</hl>.",
+        amg=f"Tessellated stitch mesh at level <hl>{level}</hl> ({level + 1}×{level + 1} stitches per face).",
         pos="topCenter",
         fade=True
     )
@@ -195,22 +260,25 @@ stitch_color_map = {
 
 
 def init_stitch_face_data_structure():
-    sel = om.MGlobal.getActiveSelectionList()
-    dag, comp = sel.getComponent(0)
-    
-    mesh_fn = om.MFnMesh(dag)
-    it = om.MItMeshPolygon(dag, comp)
-    
+    if not STATE.base_mesh:
+        return
+
+    sel = om.MSelectionList()
+    sel.add(STATE.base_mesh)
+    dag = sel.getDagPath(0)
+    if not dag.hasFn(om.MFn.kMesh):
+        dag.extendToShape()
+
+    it = om.MItMeshPolygon(dag)
+
     while not it.isDone():
         face_id = it.index()
         edge_count = it.polygonVertexCount()
-    
         STATE.face_stitch_map[face_id] = FaceStitchData(
             StitchType.NOTASSIGNED,
             StitchDir.UP,
             edge_count
         )
-    
         it.next()
 
 def init_stitch_mesh_data_structures():
