@@ -185,12 +185,12 @@ class FaceStitchData:
     edge_count: int
 
 stitch_color_map = {
-    StitchType.NOTASSIGNED: om.MColor((0.2, 0.2, 0.2)),  # dark gray
-    StitchType.KNIT:        om.MColor((0.0, 1.0, 0.0)),  # green
-    StitchType.PURL:        om.MColor((1.0, 0.0, 0.0)),  # red
-    StitchType.YARNOVER:    om.MColor((0.0, 0.5, 1.0)),  # light blue
-    StitchType.INCREASE:    om.MColor((1.0, 1.0, 0.0)),  # yellow
-    StitchType.DECREASE:    om.MColor((1.0, 0.0, 1.0)),  # magenta
+    StitchType.NOTASSIGNED: om.MColor((0.25, 0.25, 0.28)),  # soft charcoal
+    StitchType.KNIT:        om.MColor((0.30, 0.65, 0.42)),  # sage green
+    StitchType.PURL:        om.MColor((0.75, 0.32, 0.32)),  # muted coral
+    StitchType.YARNOVER:    om.MColor((0.30, 0.58, 0.82)),  # dusty blue
+    StitchType.INCREASE:    om.MColor((0.85, 0.68, 0.22)),  # warm amber
+    StitchType.DECREASE:    om.MColor((0.68, 0.35, 0.65)),  # soft plum
 }
 
 #MOVED TO STATE
@@ -513,6 +513,92 @@ def set_selected_edges_to_course():
 
 
 
+def apply_pattern_fill(pattern_type="checker"):
+    """
+    Floods all fully-assigned quad faces with an alternating k/p pattern.
+    Uses BFS over the face adjacency graph, stepping across COURSE edges to
+    advance the row coordinate and across WALE edges to advance the column.
+
+    pattern_type:
+        "checker" - alternates k/p in both row and column (row+col parity)
+        "rib"     - alternates k/p by column only (col parity)
+    """
+    from collections import deque
+
+    if not STATE.face_stitch_map:
+        om.MGlobal.displayError("No stitch faces. Initialize the stitch mesh first.")
+        return
+
+    if not STATE.base_mesh:
+        om.MGlobal.displayError("No base mesh. Select a mesh first.")
+        return
+
+    cmds.select(STATE.base_mesh, replace=True)
+    sel = om.MGlobal.getActiveSelectionList()
+    if sel.length() == 0:
+        om.MGlobal.displayError("Could not select base mesh.")
+        return
+
+    dagPath = sel.getDagPath(0)
+    if not dagPath.hasFn(om.MFn.kMesh):
+        dagPath.extendToShape()
+
+    # Build edge -> [face_ids] so we can find shared edges efficiently.
+    edge_to_faces = {}
+    face_iter = om.MItMeshPolygon(dagPath)
+    while not face_iter.isDone():
+        face_id = face_iter.index()
+        if face_id in STATE.face_stitch_map:
+            for edge_id in face_iter.getEdges():
+                edge_to_faces.setdefault(edge_id, []).append(face_id)
+        face_iter.next()
+
+    # Build face adjacency: face_id -> list of (neighbor_face_id, shared_edge_id)
+    face_adj = {fid: [] for fid in STATE.face_stitch_map}
+    for edge_id, face_list in edge_to_faces.items():
+        if len(face_list) == 2:
+            f0, f1 = face_list
+            face_adj[f0].append((f1, edge_id))
+            face_adj[f1].append((f0, edge_id))
+
+    # BFS: assign (row, col) to every reachable face.
+    # Crossing a COURSE edge advances the row; crossing a WALE edge advances the column.
+    face_coords = {}
+    start_face = next(iter(STATE.face_stitch_map))
+    queue = deque([(start_face, 0, 0)])
+    face_coords[start_face] = (0, 0)
+
+    while queue:
+        fid, row, col = queue.popleft()
+        for nbr_face, shared_edge in face_adj.get(fid, []):
+            if nbr_face in face_coords:
+                continue
+            edge_type = STATE.edge_map.get(shared_edge, EdgeType.UNASSIGNED)
+            if edge_type == EdgeType.COURSE:
+                new_coords = (row + 1, col)
+            elif edge_type == EdgeType.WALE:
+                new_coords = (row, col + 1)
+            else:
+                new_coords = (row, col + 1)  # treat unassigned as wale
+            face_coords[nbr_face] = new_coords
+            queue.append((nbr_face, new_coords[0], new_coords[1]))
+
+    # Assign stitch types based on pattern parity.
+    updated = 0
+    for face_id, (row, col) in face_coords.items():
+        if face_id not in STATE.face_stitch_map:
+            continue
+        if STATE.face_stitch_map[face_id].edge_count != 4:
+            continue  # increase/decrease faces (5-sided) keep their type
+
+        parity = (row + col) % 2 if pattern_type == "checker" else col % 2
+        STATE.face_stitch_map[face_id].stitch_type = StitchType.KNIT if parity == 0 else StitchType.PURL
+        updated += 1
+
+    om.MGlobal.displayInfo(f"Pattern fill '{pattern_type}' applied to {updated} faces.")
+    color_knit_faces()
+
+
 def print_edge_map():
     for edge, edge_type in STATE.edge_map.items():
         print(f"Edge {edge}: {edge_type.name}")
@@ -589,11 +675,11 @@ def draw_course_edges_as_curves():
                 name=f"courseEdge_{edge_id}_crv"
             )
 
-            # color it blue
+            # teal for course edges
             shape = cmds.listRelatives(curve, shapes=True)[0]
             cmds.setAttr(shape + ".overrideEnabled", 1)
             cmds.setAttr(shape + ".overrideRGBColors", 1)
-            cmds.setAttr(shape + ".overrideColorRGB", 0, 0, 1)
+            cmds.setAttr(shape + ".overrideColorRGB", 0.18, 0.65, 0.72)
             cmds.setAttr(shape + ".lineWidth", 10)
             cmds.setAttr(curve + ".overrideEnabled", 1)
             cmds.setAttr(curve + ".overrideDisplayType", 1)  # 1 = Template
@@ -616,11 +702,11 @@ def draw_course_edges_as_curves():
                 name=f"courseEdge_{edge_id}_crv"
             )
 
-            # color it blue
+            # lavender for wale edges
             shape = cmds.listRelatives(curve, shapes=True)[0]
             cmds.setAttr(shape + ".overrideEnabled", 1)
             cmds.setAttr(shape + ".overrideRGBColors", 1)
-            cmds.setAttr(shape + ".overrideColorRGB", 1, 0, 1)
+            cmds.setAttr(shape + ".overrideColorRGB", 0.62, 0.45, 0.78)
             cmds.setAttr(shape + ".lineWidth", 4)
             cmds.setAttr(curve + ".overrideEnabled", 1)
             cmds.setAttr(curve + ".overrideDisplayType", 1)  # 1 = Template

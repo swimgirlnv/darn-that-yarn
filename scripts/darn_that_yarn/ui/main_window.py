@@ -16,6 +16,7 @@ from darn_that_yarn.commands.stitch_commands import (
     set_selected_edges_to_course,
     are_selected_faces_active,
     set_selected_faces_stitch_type,
+    apply_pattern_fill,
     StitchType
 )
 
@@ -53,31 +54,36 @@ def close_darn_that_yarn_ui():
 
 
 def show_darn_that_yarn_ui():
+    close_darn_that_yarn_ui()
+
+    cmds.workspaceControl(
+        WORKSPACE_NAME,
+        label="Darn that Yarn!",
+        retain=False,
+        floating=True,
+        initialWidth=360,
+        initialHeight=660
+    )
+
+    content = cmds.columnLayout(adj=True, parent=WORKSPACE_NAME)
+    _build_ui(content)
+    _register_script_jobs()
+
     mesh = get_selected_mesh_transform()
     if mesh:
-        STATE.selected_mesh = mesh
-        _set_status(f"Ready. Mesh selected: {mesh}")
-        close_darn_that_yarn_ui()
-        print("show_darn_that_yarn_ui CALLED")
-
-        cmds.workspaceControl(
-            WORKSPACE_NAME,
-            label="Darn that Yarn!",
-            retain=False,
-            floating=True,
-            initialWidth=360,
-            initialHeight=620
-        )
-
-        content = cmds.columnLayout(adj=True, parent=WORKSPACE_NAME)
-        _build_ui(content)
-        _register_script_jobs()
-        init_stitch_mesh_data_structures()
-        init_stitch_face_data_structure()
-        draw_course_edges_as_curves()
-        refresh_ui_state()
+        _activate_mesh(mesh)
     else:
-        show_no_mesh_selected_warning()
+        refresh_ui_state()
+
+
+def _activate_mesh(mesh):
+    STATE.selected_mesh = mesh
+    STATE.base_mesh = mesh
+    _set_status(f"Active mesh: {mesh}")
+    init_stitch_mesh_data_structures()
+    init_stitch_face_data_structure()
+    draw_course_edges_as_curves()
+    refresh_ui_state()
 
 
 def _build_ui(parent):
@@ -90,10 +96,18 @@ def _build_ui(parent):
         font="boldLabelFont"
     )
 
+    UI["set_mesh_btn"] = cmds.button(
+        label="Set Active Mesh",
+        command=lambda *_: _handle_set_mesh(),
+        height=32,
+        annotation="Select a polygon mesh in the viewport, then click this to begin."
+    )
+
     UI["status"] = cmds.text(
-        label="Select one polygon mesh to begin.",
+        label="Select a polygon mesh and click Set Active Mesh.",
         align="left",
-        height=24
+        height=24,
+        wordWrap=True
     )
 
     cmds.separator(height=10, style="in")
@@ -115,7 +129,8 @@ def _build_ui(parent):
         label="Set Course Edge Loop",
         command=lambda *_: set_selected_edges_to_course(),
         enable=False,
-        height=32
+        height=32,
+        annotation="Select edges in the viewport, then click to mark them as course edges (horizontal rows). Perpendicular edges are automatically marked as wale edges."
     )
 
     cmds.separator(height=8, style="none")
@@ -133,20 +148,42 @@ def _build_ui(parent):
         label="Set Stitch Type",
         command=lambda *_: _handle_set_stitch_type(),
         enable=False,
-        height=32
+        height=32,
+        annotation="Select fully-assigned faces, choose a stitch type from the dropdown, then click to apply. Only available on faces whose edges are all labeled."
     )
 
     UI["flip_row_btn"] = cmds.button(
         label="Flip Row Direction",
         command=lambda *_: _handle_flip_row_direction(),
         enable=False,
-        height=32
+        height=32,
+        annotation="Flips the knit direction for all stitches in the selected faces' row."
     )
+
+    cmds.separator(height=8, style="none")
+
+    UI["pattern_menu"] = cmds.optionMenu(
+        label="Pattern Fill",
+        annotation="Choose a fill pattern to apply across all assigned faces."
+    )
+    for p in ["checker", "rib"]:
+        cmds.menuItem(label=p)
+
+    UI["pattern_fill_btn"] = cmds.button(
+        label="Apply Pattern Fill",
+        command=lambda *_: _handle_pattern_fill(),
+        enable=False,
+        height=32,
+        annotation="Auto-fills all assigned quad faces with the selected pattern: checker alternates k/p in both directions, rib alternates by column only."
+    )
+
+    cmds.separator(height=8, style="none")
 
     UI["reset_btn"] = cmds.button(
         label="RESET Stitch Mesh",
         command=lambda *_: _handle_reset(),
-        height=32
+        height=32,
+        annotation="Clears all course/wale edge assignments and stitch data, restoring the mesh to its original unassigned state."
     )
 
     cmds.setParent("..")
@@ -177,32 +214,37 @@ def _build_ui(parent):
         label="Tessellate",
         command=lambda *_: _handle_tessellate(),
         enable=False,
-        height=32
+        height=32,
+        annotation="Subdivides the stitch mesh by the tessellation level above. Higher values = more stitches. A preview mesh is created; the original is preserved."
     )
 
     UI["restore_btn"] = cmds.button(
         label="Restore Original Mesh",
         command=lambda *_: _handle_restore_mesh(),
         enable=False,
-        height=32
+        height=32,
+        annotation="Removes the tessellated preview and restores the original base mesh."
     )
 
     UI["mesh_relax_cb"] = cmds.checkBox(
         label="Stitch Mesh Relaxation",
         value=True,
-        changeCommand=lambda value: _handle_mesh_relax_changed(value)
+        changeCommand=lambda value: _handle_mesh_relax_changed(value),
+        annotation="When enabled, applies a relaxation pass to the stitch mesh before generating yarn geometry to even out stitch sizing."
     )
     UI["yarn_relax_cb"] = cmds.checkBox(
         label="Yarn Level Relaxation",
         value=True,
-        changeCommand=lambda value: _handle_yarn_relax_changed(value)
+        changeCommand=lambda value: _handle_yarn_relax_changed(value),
+        annotation="When enabled, applies a physics-based relaxation to the yarn geometry for a more realistic drape."
     )
 
     UI["generate_btn"] = cmds.button(
         label="Generate Knit Mesh",
         command=lambda *_: _handle_generate(),
         enable=False,
-        height=36
+        height=36,
+        annotation="Runs the full pipeline: tessellate, optional mesh relaxation, yarn curve generation, and optional yarn-level relaxation."
     )
 
     cmds.setParent("..")
@@ -212,11 +254,20 @@ def _build_ui(parent):
 
     UI["help_text"] = cmds.text(
         label=(
-            "Workflow: Select one mesh → select edge loops → Set Course Edge Loop "
-            "→ tessellate → generate knit mesh."
+            "Workflow: Select one mesh → Set Active Mesh → select edge loops "
+            "→ Set Course Edge Loop → Apply Pattern Fill → Tessellate → Generate Knit Mesh."
         ),
         align="left",
         wordWrap=True
+    )
+
+    cmds.separator(height=10, style="in")
+
+    UI["cancel_btn"] = cmds.button(
+        label="Cancel / Close Panel",
+        command=lambda *_: close_darn_that_yarn_ui(),
+        height=32,
+        annotation="Close the Darn that Yarn panel. Your mesh and stitch data are preserved in the scene."
     )
 
 
@@ -242,34 +293,39 @@ def _set_status(message: str):
 
 
 def refresh_ui_state(*_):
-    print("REFRESH UI CALLED!")
-    info = get_selection_summary()
+    has_mesh = bool(STATE.base_mesh)
 
+    if not has_mesh:
+        _set_status("Select a polygon mesh and click Set Active Mesh.")
+        cmds.text(UI["selected_edges_label"], edit=True, label="Selected Edges: None")
+        cmds.text(UI["selected_faces_label"], edit=True, label="Selected Faces: None")
+        for key in ("set_course_btn", "set_stitch_btn", "flip_row_btn",
+                    "pattern_fill_btn", "tessellate_btn", "restore_btn", "generate_btn"):
+            cmds.button(UI[key], edit=True, enable=False)
+        return
+
+    info = get_selection_summary()
     edges = info["edges"]
     faces = info["faces"]
 
-    mesh = STATE.selected_mesh
-    _set_status(f"Active mesh: {mesh}")
+    _set_status(f"Active mesh: {STATE.base_mesh}")
 
-    cmds.text(
-        UI["selected_edges_label"],
-        edit=True,
-        label=f"Selected Edges: {len(edges)}"
-    )
-    cmds.text(
-        UI["selected_faces_label"],
-        edit=True,
-        label=f"Selected Faces: {len(faces)}"
-    )
+    cmds.text(UI["selected_edges_label"], edit=True, label=f"Selected Edges: {len(edges)}")
+    cmds.text(UI["selected_faces_label"], edit=True, label=f"Selected Faces: {len(faces)}")
 
     has_edges = len(edges) > 0
     has_faces = len(faces) > 0
     has_active_faces_selected = are_selected_faces_active()
-    has_any_stitch_data = len(STATE.course_edges) > 0 or len(STATE.active_faces) > 0
+    has_any_stitch_data = (
+        len(STATE.course_edges) > 0
+        or len(STATE.active_faces) > 0
+        or any(v.name == "COURSE" for v in STATE.edge_map.values())
+    )
 
     cmds.button(UI["set_course_btn"], edit=True, enable=has_edges)
     cmds.button(UI["set_stitch_btn"], edit=True, enable=has_faces and has_active_faces_selected)
     cmds.button(UI["flip_row_btn"], edit=True, enable=has_faces and has_active_faces_selected)
+    cmds.button(UI["pattern_fill_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["tessellate_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["restore_btn"], edit=True, enable=STATE.is_tessellated)
     cmds.button(UI["generate_btn"], edit=True, enable=has_any_stitch_data)
@@ -281,6 +337,14 @@ def show_no_mesh_selected_warning():
             button=['Confirm'],
             defaultButton='Confirm'
         )
+
+def _handle_set_mesh():
+    mesh = get_selected_mesh_transform()
+    if mesh:
+        _activate_mesh(mesh)
+    else:
+        _set_status("No polygon mesh selected. Select one in the viewport first.")
+
 
 def _handle_set_course_edges():
     edges = get_selection_summary()["edges"]
@@ -322,6 +386,12 @@ def _handle_yarn_relax_changed(value):
 
 def _handle_generate():
     generate_knit_mesh()
+
+
+def _handle_pattern_fill():
+    pattern = cmds.optionMenu(UI["pattern_menu"], query=True, value=True)
+    apply_pattern_fill(pattern)
+    refresh_ui_state()
 
 
 def _handle_reset():
