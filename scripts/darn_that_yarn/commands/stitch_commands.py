@@ -203,13 +203,23 @@ def restore_stitch_mesh():
 
 def generate_knit_mesh():
     """
-    Placeholder for the end-to-end pipeline.
+    End-to-end pipeline: generates yarn curves for every knitting row and
+    optionally wraps each curve in a tube mesh to represent physical yarn.
+    Mesh-based and yarn-level relaxation remain placeholders for a future task.
     """
+    from darn_that_yarn.commands.yarn_curve import generate_yarn_curves
+
+    nodes = generate_yarn_curves(
+        add_tubes=True,
+        yarn_radius=0.0,          # 0 = auto-compute safe radius
+        tube_segments=6,
+    )
+
     cmds.inViewMessage(
         amg=(
-            f"Generate Knit Mesh called "
+            f"Generated <hl>{len(nodes)}</hl> yarn path(s). "
             f"(mesh relax={STATE.mesh_relaxation_enabled}, "
-            f"yarn relax={STATE.yarn_relaxation_enabled})."
+            f"yarn relax={STATE.yarn_relaxation_enabled})"
         ),
         pos="topCenter",
         fade=True
