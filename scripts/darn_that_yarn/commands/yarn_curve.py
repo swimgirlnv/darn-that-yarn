@@ -62,7 +62,7 @@ class YarnCurve:
         self.points.extend(pts)
 
     # ------------------------------------------------------------------
-    def build_maya_curve(self, name: str = "yarn_curve") -> str:
+    def build_maya_curve(self, name: str = "yarn_curve", closed: bool = False) -> str:
         """
         Create a Maya NURBS curve from the stored control points.
 
@@ -70,6 +70,12 @@ class YarnCurve:
         smooth yarn path; degree-1 (linear) is used as a fallback for
         very short curves.  Returns the transform node name on success,
         or an empty string if there are fewer than 2 points.
+
+        closed : if True, build a periodic (closed-loop) NURBS curve so the
+                 yarn wraps continuously around tube/cylinder geometry.  The
+                 first and last control points sit on opposite sides of the
+                 shared wale edge between the last and first stitch; Maya's
+                 periodic NURBS interpolates the connecting arc automatically.
         """
         n = len(self.points)
         if n < 2:
@@ -78,6 +84,13 @@ class YarnCurve:
 
         degree = min(3, n - 1)
         pts = [(p.x, p.y, p.z) for p in self.points]
+
+        if closed and degree == 3:
+            # per=True creates a periodic cubic NURBS that closes smoothly.
+            # Maya connects the last CV back to the first, forming the
+            # connecting arc that wraps the yarn around the back of the tube.
+            return cmds.curve(p=pts, d=degree, per=True, name=name)
+
         return cmds.curve(p=pts, d=degree, name=name)
 
 
@@ -307,21 +320,26 @@ def append_knit_points(
     characteristic knit "V", and exits at the bottom-right ready to enter
     the next stitch.
     """
-    # 9 control points give a smooth V-shape with visible depth.
-    # entry/exit are slightly in front (+n) — the yarn emerges forward after being
-    # pulled through the loop of the row below.
-    # The loop top extends to v=+0.55 (slightly above the shared course edge) so
-    # the next row's yarn is visually threaded through this row's loop.
+    # 11 control points model the yarn path through a knit stitch.
+    # For row-to-row interlocking (Yuksel et al. 2012 §6.2):
+    #   - Row N's arch arms sit at n=−0.38 (behind fabric).
+    #   - Row N+1's dip must satisfy n < −0.38 so the yarn starts BEHIND the arch.
+    #   - Row N+1's emerge at n=+0.30 is in FRONT of the arch.
+    #   - The NURBS curve therefore crosses n=−0.38, producing a visible threading.
+    # Arch arms span u=±0.35 (matching the legs) so the arch encircles the
+    # threading yarn laterally as well.
     LOCAL: List[Tuple[float, float, float]] = [
-        (-0.35, -0.50,  0.12),  # entry – bottom-left, forward (pulled through below)
-        (-0.38, -0.25,  0.00),  # left leg: transition at mid-lower
-        (-0.35,  0.05, -0.22),  # left leg: behind fabric at mid-height
-        (-0.12,  0.42, -0.32),  # loop top-left (behind, near top edge)
-        ( 0.00,  0.55, -0.32),  # loop top-center: peaks slightly above face boundary
-        ( 0.12,  0.42, -0.32),  # loop top-right (behind, near top edge)
-        ( 0.35,  0.05, -0.22),  # right leg: behind fabric at mid-height
-        ( 0.38, -0.25,  0.00),  # right leg: transition at mid-lower
-        ( 0.35, -0.50,  0.12),  # exit – bottom-right, forward (pulled through below)
+        (-0.35, -0.70, -0.55),  # dip BEHIND prev row's arch (arch=−0.38; must be < −0.38)
+        (-0.35, -0.50,  0.30),  # EMERGE in front — crossing through n=−0.38 gives threading
+        (-0.38, -0.20,  0.05),  # lower left leg, slight forward
+        (-0.35,  0.08, -0.22),  # mid left leg, behind fabric
+        (-0.35,  0.45, -0.38),  # left arch arm — same width as legs
+        ( 0.00,  0.62, -0.38),  # loop top: into next row's space (behind)
+        ( 0.35,  0.45, -0.38),  # right arch arm — same width as legs
+        ( 0.35,  0.08, -0.22),  # mid right leg, behind fabric
+        ( 0.38, -0.20,  0.05),  # lower right leg, slight forward
+        ( 0.35, -0.50,  0.30),  # EMERGE in front
+        ( 0.35, -0.70, -0.55),  # dip BEHIND prev row's arch
     ]
     for u, v, n in LOCAL:
         curve.append(_face_pt(face, u, v, n, width, height))
@@ -340,16 +358,20 @@ def append_purl_points(
     fabric.
     """
     # Purl is the n-mirror of knit: loop faces forward (+n), entry/exit go behind.
+    # Arch arms widen to u=±0.35 for the same reason as knit — they must span
+    # the leg width to encircle the next row's threading yarn.
     LOCAL: List[Tuple[float, float, float]] = [
-        (-0.35, -0.50, -0.12),  # entry – bottom-left, behind fabric
-        (-0.38, -0.25,  0.00),  # left leg: transition at mid-lower
-        (-0.35,  0.05,  0.22),  # left leg: in front of fabric at mid-height
-        (-0.12,  0.42,  0.32),  # loop top-left (in front, near top edge)
-        ( 0.00,  0.55,  0.32),  # loop top-center: peaks slightly above face boundary
-        ( 0.12,  0.42,  0.32),  # loop top-right (in front, near top edge)
-        ( 0.35,  0.05,  0.22),  # right leg: in front at mid-height
-        ( 0.38, -0.25,  0.00),  # right leg: transition at mid-lower
-        ( 0.35, -0.50, -0.12),  # exit – bottom-right, behind fabric
+        (-0.35, -0.70,  0.55),  # dip IN FRONT of prev row's purl arch (arch=+0.38; must be > +0.38)
+        (-0.35, -0.50, -0.30),  # EMERGE behind — crossing through n=+0.38 gives threading
+        (-0.38, -0.20, -0.05),  # lower left leg, slight behind
+        (-0.35,  0.08,  0.22),  # mid left leg, in front
+        (-0.35,  0.45,  0.38),  # left arch arm — same width as legs
+        ( 0.00,  0.62,  0.38),  # loop top: into next row's space (in front)
+        ( 0.35,  0.45,  0.38),  # right arch arm — same width as legs
+        ( 0.35,  0.08,  0.22),  # mid right leg, in front
+        ( 0.38, -0.20, -0.05),  # lower right leg, slight behind
+        ( 0.35, -0.50, -0.30),  # EMERGE behind
+        ( 0.35, -0.70,  0.55),  # dip IN FRONT of prev row's purl arch
     ]
     for u, v, n in LOCAL:
         curve.append(_face_pt(face, u, v, n, width, height))
@@ -580,7 +602,7 @@ def _compute_max_radius(points: List[om.MPoint]) -> float:
             if d_sq < min_dist_sq:
                 min_dist_sq = d_sq
 
-    return math.sqrt(min_dist_sq) * 0.45
+    return math.sqrt(min_dist_sq) * 0.55
 
 
 def _sample_curve(
@@ -907,7 +929,7 @@ def generate_yarn_curves(
     cmds.refresh(suspend=True)  # type: ignore[attr-defined]
     try:
         _generate_rows(
-            rows, min_row, max_row, dag_path, add_tubes,
+            rows, min_row, max_row, dag_path, face_adj, add_tubes,
             yarn_radius, tube_segments, created_nodes,
         )
     finally:
@@ -925,6 +947,7 @@ def _generate_rows(
     min_row: int,
     max_row: int,
     dag_path,  # om.MDagPath — stubs incomplete
+    face_adj: dict,
     add_tubes: bool,
     yarn_radius: float,
     tube_segments: int,
@@ -981,6 +1004,14 @@ def _generate_rows(
             wale_ref = (0.0, 1.0, 0.0)
 
         face_list = rows[row_idx]
+
+        # Precompute per-face centroids in this row for course_axis orientation.
+        row_face_centers = {
+            fid: face_centroids[fid]
+            for _, fid in face_list
+            if fid in face_centroids
+        }
+
         for face_idx, (_col, fid) in enumerate(face_list):
             face_data = STATE.face_stitch_map.get(fid)
             if face_data is None:
@@ -989,8 +1020,9 @@ def _generate_rows(
             ctx    = build_face_context(dag_path, fid)
             width, height = _compute_face_dimensions(dag_path, fid)
 
-            # Orient wale_axis toward the next row so loop tops (v > 0.5) always
-            # extend into the adjacent row's space, enabling visual interlocking.
+            # ── Wale axis: ensure it points toward the next row ───────────
+            # Without this, v=+0.70 (loop top) can go the wrong direction for
+            # half the faces, creating large visual gaps between rows.
             dot = (ctx.wale_axis.x * wale_ref[0]
                    + ctx.wale_axis.y * wale_ref[1]
                    + ctx.wale_axis.z * wale_ref[2])
@@ -998,6 +1030,45 @@ def _generate_rows(
                 ctx.wale_axis = om.MVector(  # type: ignore[attr-defined]
                     -ctx.wale_axis.x, -ctx.wale_axis.y, -ctx.wale_axis.z
                 )
+
+            # ── Course axis: ensure it points toward the next face in the row ─
+            # Without this, u=+0.35 (exit) can point LEFT for some faces,
+            # reversing entry/exit and breaking within-row connections.
+            if face_idx + 1 < len(face_list):
+                _, next_fid = face_list[face_idx + 1]
+                if next_fid in row_face_centers and fid in row_face_centers:
+                    cc = row_face_centers[fid]
+                    nc = row_face_centers[next_fid]
+                    cref_x = nc[0] - cc[0]
+                    cref_y = nc[1] - cc[1]
+                    cref_z = nc[2] - cc[2]
+                    cdot = (ctx.course_axis.x * cref_x
+                            + ctx.course_axis.y * cref_y
+                            + ctx.course_axis.z * cref_z)
+                    if cdot < 0:
+                        ctx.course_axis = om.MVector(  # type: ignore[attr-defined]
+                            -ctx.course_axis.x,
+                            -ctx.course_axis.y,
+                            -ctx.course_axis.z,
+                        )
+            elif face_idx > 0:
+                # Last face: point away from previous face.
+                _, prev_fid = face_list[face_idx - 1]
+                if prev_fid in row_face_centers and fid in row_face_centers:
+                    cc = row_face_centers[fid]
+                    pc = row_face_centers[prev_fid]
+                    cref_x = cc[0] - pc[0]
+                    cref_y = cc[1] - pc[1]
+                    cref_z = cc[2] - pc[2]
+                    cdot = (ctx.course_axis.x * cref_x
+                            + ctx.course_axis.y * cref_y
+                            + ctx.course_axis.z * cref_z)
+                    if cdot < 0:
+                        ctx.course_axis = om.MVector(  # type: ignore[attr-defined]
+                            -ctx.course_axis.x,
+                            -ctx.course_axis.y,
+                            -ctx.course_axis.z,
+                        )
 
             # Cast-on once before the first stitch of the row.
             if is_first_row and face_idx == 0:
@@ -1015,7 +1086,24 @@ def _generate_rows(
         if not curve.points:
             continue
 
-        curve_node = curve.build_maya_curve(f"yarn_row_{row_idx:04d}")
+        # Detect closed (tube) rows: if the last face and first face in this
+        # row share a WALE edge, the row forms a complete ring around the
+        # geometry and the NURBS curve must be periodic so the yarn wraps
+        # continuously rather than leaving an open seam at the back.
+        is_closed_row = False
+        if len(face_list) >= 2:
+            first_fid = face_list[0][1]
+            last_fid  = face_list[-1][1]
+            for nbr_fid, shared_eid in face_adj.get(last_fid, []):
+                if nbr_fid == first_fid:
+                    etype = STATE.edge_map.get(shared_eid, EdgeType.UNASSIGNED)
+                    if getattr(etype, "name", str(etype)) == "WALE":
+                        is_closed_row = True
+                        break
+
+        curve_node = curve.build_maya_curve(
+            f"yarn_row_{row_idx:04d}", closed=is_closed_row
+        )
         if not curve_node:
             continue
 
