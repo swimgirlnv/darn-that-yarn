@@ -19,6 +19,10 @@ class StitchToolState:
     face_stitch_map = {}
     edge_map = {}
     base_mesh = None
+    t_face_stitch_map = {}
+    t_edge_map = {}
+    t_mesh = None
+    smoothed_mesh: Optional[str] = None
 
     def reset(self):
         self.course_edges.clear()

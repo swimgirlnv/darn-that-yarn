@@ -66,6 +66,200 @@ def flip_row_direction(selected_faces):
     )
 
 
+def get_edge_midpoint(dag_path, edge_index):
+    mesh_fn = om.MFnMesh(dag_path)
+    edge_it = om.MItMeshEdge(dag_path)
+    
+    edge_it.setIndex(edge_index)
+    vtx_ids = edge_it.vertexId(0), edge_it.vertexId(1)
+    
+    p1 = mesh_fn.getPoint(vtx_ids[0], om.MSpace.kWorld)
+    p2 = mesh_fn.getPoint(vtx_ids[1], om.MSpace.kWorld)
+    
+    # FIX: manually compute midpoint
+    mid = om.MPoint(
+        (p1.x + p2.x) * 0.5,
+        (p1.y + p2.y) * 0.5,
+        (p1.z + p2.z) * 0.5
+    )
+    
+    return mid
+
+def checkAligned(dag_pathA, edge_indexA, dag_pathB, edge_indexB):
+    mesh_fnA = om.MFnMesh(dag_pathA)
+    edge_itA = om.MItMeshEdge(dag_pathA)
+    
+    edge_itA.setIndex(edge_indexA)
+    vtx_idsB = edge_itA.vertexId(0), edge_itA.vertexId(1)
+    
+    p1A = mesh_fnA.getPoint(vtx_idsB[0], om.MSpace.kWorld)
+    p2A = mesh_fnA.getPoint(vtx_idsB[1], om.MSpace.kWorld)
+
+    mesh_fnB = om.MFnMesh(dag_pathB)
+    edge_itB = om.MItMeshEdge(dag_pathB)
+    
+    edge_itB.setIndex(edge_indexB)
+    vtx_idsB = edge_itB.vertexId(0), edge_itB.vertexId(1)
+    
+    p1B = mesh_fnB.getPoint(vtx_idsB[0], om.MSpace.kWorld)
+    p2B = mesh_fnB.getPoint(vtx_idsB[1], om.MSpace.kWorld)
+
+    dirA = p2A - p1A
+    dirB = p2B - p1B
+    tol = 0.01
+    # --- 1. Parallel check ---
+    if (dirA ^ dirB).length() > tol:
+        return False
+
+    # --- 2. Collinearity check ---
+    dirA1toB2 = p2B - p1A
+    dirB1toA2 = p2A - p1B
+    if (dirA1toB2 ^ dirA).length() > tol:
+        return False
+    if (dirB1toA2 ^ dirA).length() > tol:
+        return False
+
+    dirA_norm = dirA.normal()
+    dirAB_norm = dirA1toB2.normal()
+    if (dirA_norm - dirAB_norm).length() > tol:
+        return False
+    # if(dirA_norm != dirAB_norm):
+    #     return False
+
+    return True
+
+def spreadEdgeAssignment():
+    
+    # Get all edges marked as 'course'
+    course_edges = [e for e, t in STATE.t_edge_map.items() if t == EdgeType.COURSE]
+    if not course_edges:
+        cmds.warning("No 'course' edges in the map.")
+        return
+
+    preview_sel = om.MSelectionList()
+    preview_sel.add(STATE.preview_mesh)
+    dagPath = preview_sel.getDagPath(0)
+    edge_iter = om.MItMeshEdge(dagPath)
+
+    while (course_edges):
+        connected_vertices = set()
+        connected_faces = set()
+
+        #SET PERP EDGES TO WALE
+        for edge_id in course_edges:
+            edge_iter.setIndex(edge_id)
+            v0 = edge_iter.vertexId(0)
+            v1 = edge_iter.vertexId(1)
+
+            connected_vertices.add(v0)
+            connected_vertices.add(v1)
+
+            # faces
+            faces = edge_iter.getConnectedFaces()
+            for f in faces:
+                connected_faces.add(f)
+        
+        vert_iter = om.MItMeshVertex(dagPath)
+        unnassignedFound = False
+        for v in connected_vertices:
+            vert_iter.setIndex(v)
+            connected_edges = vert_iter.getConnectedEdges()
+            
+            for e in connected_edges:
+                if STATE.t_edge_map[e] ==  EdgeType.UNASSIGNED:
+                    STATE.t_edge_map[e] = EdgeType.WALE
+                    unnassignedFound = True
+        if unnassignedFound == False:
+            return
+
+        #CLOSE FACES BY SETTING LAST EDGE TO COURSE
+        # empty course edges so you can add newly assigned course edges here
+        course_edges = []
+
+        poly_iter = om.MItMeshPolygon(dagPath)
+        for face_id in connected_faces:
+            print(face_id)
+            poly_iter.setIndex(face_id)
+
+            edge_ids = poly_iter.getEdges()
+            numAssignedEdges = 0
+            unassignedEdgeId = -1
+            for e_id in edge_ids:
+                edge_type = STATE.t_edge_map.get(e_id)
+                if edge_type != EdgeType.UNASSIGNED:
+                    numAssignedEdges = numAssignedEdges + 1
+                else:
+                    unassignedEdgeId = e_id
+            if numAssignedEdges == 3 and unassignedEdgeId != -1:
+                print("Assigning COURSE!")
+                STATE.t_edge_map[unassignedEdgeId] = EdgeType.COURSE
+                course_edges.append(unassignedEdgeId)
+        
+    
+
+
+def _assign_tslt_edges_from_base():
+    preview_sel = om.MSelectionList()
+    preview_sel.add(STATE.preview_mesh)
+    dag_a = preview_sel.getDagPath(0)
+
+    base_sel = om.MSelectionList()
+    base_sel.add(STATE.base_mesh)
+    dag_b = base_sel.getDagPath(0)
+
+    edge_it_a = om.MItMeshEdge(dag_a)
+    edge_it_b = om.MItMeshEdge(dag_b)
+
+    mesh_b_edge_midpoints = []
+    
+    # Precompute midpoints for mesh B
+    while not edge_it_b.isDone():
+        edge_b_index = edge_it_b.index()
+        mid = get_edge_midpoint(dag_b, edge_it_b.index())
+        mesh_b_edge_midpoints.append((edge_it_b.index(), mid))
+        #STATE.t_edge_map[edge_b_index] = STATE.edge_map[edge_b_index]
+        edge_it_b.next()
+
+
+    # Iterate edges of mesh A
+    while not edge_it_a.isDone():
+        edge_a_index = edge_it_a.index()
+        mid_a = get_edge_midpoint(dag_a, edge_a_index)
+
+        closest_edge = None
+        min_dist = float('inf')
+        aligned = False
+        midpointLength = 0.0
+
+        edge_it_b = om.MItMeshEdge(dag_b)
+        while not edge_it_b.isDone():
+            aligned = checkAligned(dag_a, edge_a_index, dag_b, edge_it_b.index())
+            edge_b_index = edge_it_b.index()
+            mid_b = get_edge_midpoint(dag_b, edge_it_b.index())
+            dist = (mid_a - mid_b).length()  # this part is fine
+            if dist < min_dist and aligned:
+                min_dist = dist
+                closest_edge = edge_b_index
+                midpointLength = dist
+            edge_it_b.next()
+
+        # for edge_b_index, mid_b in mesh_b_edge_midpoints:
+        #     dist = (mid_a - mid_b).length()  # this part is fine
+        #     if dist < min_dist and aligned:
+        #         min_dist = dist
+        #         closest_edge = edge_b_index
+        
+
+        print("Closest edge to {}.e[{}] is {}.e[{}]".format(
+            STATE.preview_mesh, edge_a_index,
+            STATE.base_mesh, closest_edge
+        ))
+        print(min_dist)
+        if min_dist <= midpointLength:
+            STATE.t_edge_map[edge_a_index] = STATE.edge_map[closest_edge]
+
+        edge_it_a.next()
+
 def _color_preview_mesh_from_base():
     """
     Colors the tessellated preview mesh by projecting each preview face centroid
@@ -111,6 +305,7 @@ def _color_preview_mesh_from_base():
         centroid = om.MPoint(cx / len(verts), cy / len(verts), cz / len(verts))
         _, base_face_id = base_fn.getClosestPoint(centroid, om.MSpace.kWorld)
         face_data = STATE.face_stitch_map.get(base_face_id)
+        STATE.t_face_stitch_map[face_id] = face_data
         color = (
             stitch_color_map[face_data.stitch_type]
             if face_data
@@ -127,6 +322,83 @@ def _color_preview_mesh_from_base():
 
     cmds.setAttr(preview_dag.fullPathName() + ".displayColors", 1)
 
+def shrinkwrap_preview_to_smoothed():
+    # # Get selected objects
+    # sel = cmds.ls(selection=True, long=True)
+    
+    # if len(sel) != 2:
+    #     cmds.error("Please select exactly two meshes: [target, wrapper]")
+    
+    target = STATE.smoothed_mesh
+    wrapper = STATE.preview_mesh
+    
+    # Create shrinkWrap deformer
+    shrink_node = cmds.deformer(wrapper, type='shrinkWrap')[0]
+    
+    # Connect target mesh to shrinkWrap
+    cmds.connectAttr(target + ".worldMesh[0]", shrink_node + ".targetGeom", force=True)
+    
+    # Set projection type to closest point
+    # 4 = Closest Point
+    cmds.setAttr(shrink_node + ".projection", 4)
+    
+    # Optional useful defaults
+    cmds.setAttr(shrink_node + ".keepBorder", 1)
+    cmds.setAttr(shrink_node + ".smoothUVs", 1)
+    
+    print("ShrinkWrap applied: {} -> {}".format(wrapper, target))
+
+    cmds.delete(wrapper, ch=True)
+
+    cmds.delete(STATE.smoothed_mesh)
+    STATE.smoothed_mesh = None
+
+def create_smoothed_stitch_mesh(level):
+    """
+    creates catmull clark smoothed mesh so tessellated mesh can be projected onto it
+    """
+    if not STATE.selected_mesh:
+        cmds.warning("No mesh selected. Select a polygon mesh first.")
+        return
+
+    if not cmds.objExists(STATE.selected_mesh):
+        cmds.warning(f"Mesh '{STATE.selected_mesh}' no longer exists.")
+        return
+
+    # Clean up any existing smoothed mesh before creating a new one.
+    if STATE.smoothed_mesh and cmds.objExists(STATE.smoothed_mesh):
+        cmds.delete(STATE.smoothed_mesh)
+        STATE.smoothed_mesh = None
+
+    # Ensure the original is visible before duplicating so the duplicate inherits
+    # the correct visibility state.
+    cmds.showHidden(STATE.selected_mesh)
+
+    duplicates = cmds.duplicate(STATE.selected_mesh, returnRootsOnly=True)
+    smoothedM = cmds.rename(duplicates[0], STATE.selected_mesh + "_smooth_target")
+    STATE.smoothed_mesh = smoothedM
+
+    # Subdivide all faces of the preview mesh.
+    # mode=1 (linear): divisions=N splits each edge into N segments → N×N faces per quad.
+    # We use level+1 so level=1 gives 2×2=4 stitch faces (minimum meaningful tessellation).
+    cmds.polySmooth(
+            smoothedM,
+            mth=0,              # 0 = Catmull-Clark
+            dv=level + 1,       # divisions
+            c=1,                # continuity
+            kb=0,               # keep borders
+            ksb=0,              # keep selection borders
+            khe=0,              # keep hard edges (0 = smooth them)
+            kt=1,               # keep topology
+            suv=1,              # smooth UVs
+            peh=0,              # propagate edge hardness
+            ps=0.1,             # smoothness
+            ro=1,               # keep original (construction history)
+            ch=1
+        )
+    # face_count = cmds.polyEvaluate(preview, face=True)
+    # all_faces = [f"{preview}.f[{i}]" for i in range(face_count)]
+    # cmds.polySubdivideFacet(all_faces, divisions=level + 1, mode=0)
 
 def tessellate_stitch_mesh(level):
     """
@@ -166,8 +438,43 @@ def tessellate_stitch_mesh(level):
     STATE.tessellation_level = level
     STATE.is_tessellated = True
 
+    cmds.select(preview)
+    init_t_stitch_mesh_data_structures()
+    init_t_stitch_face_data_structure()
+
+    print(STATE.t_face_stitch_map)
+    print(STATE.t_edge_map)
+    print(STATE.t_mesh)
+
     # Color the preview before hiding the base — getClosestPoint needs the base visible.
     _color_preview_mesh_from_base()
+
+    print(STATE.t_face_stitch_map)
+
+    _assign_tslt_edges_from_base()
+    print(STATE.t_edge_map)
+    print(STATE.t_mesh)
+
+    # set course edge touching edges to wale
+    spreadEdgeAssignment()
+
+    # create duplicate catmull clark smoothed mesh
+    create_smoothed_stitch_mesh(level)
+
+    # shrink wrap tesselation preview onto duplicate mesh
+    shrinkwrap_preview_to_smoothed()
+
+
+    # REPLACE CURRENT BASE WITH SMOOTHED AND TESSELLATED MESH
+    #BELOW MAY HAVE ISSUES FOR YARN CURVE GENERATION
+    # STATE.face_stitch_map = STATE.t_face_stitch_map
+    # STATE.edge_map = STATE.t_edge_map
+    # STATE.base_mesh = STATE.t_mesh
+    # draw_course_edges_as_curves()
+
+    # UNCOMMENT BELOW LINE AND COMMENT OUT SECTION DIRECTLY ABOVE TO NOT REPLACE AND STILL SHOW TESSELLATED EDGE DATA
+    draw_t_course_edges_as_curves()
+
 
     # Hide the original; the tessellated preview becomes the viewport representation.
     cmds.hide(STATE.selected_mesh)
@@ -290,6 +597,60 @@ def init_stitch_face_data_structure():
             edge_count
         )
         it.next()
+
+def init_t_stitch_face_data_structure():
+    if not STATE.t_mesh:
+        return
+
+    sel = om.MSelectionList()
+    sel.add(STATE.t_mesh)
+    dag = sel.getDagPath(0)
+    if not dag.hasFn(om.MFn.kMesh):
+        dag.extendToShape()
+
+    it = om.MItMeshPolygon(dag)
+
+    while not it.isDone():
+        face_id = it.index()
+        edge_count = it.polygonVertexCount()
+        STATE.t_face_stitch_map[face_id] = FaceStitchData(
+            StitchType.NOTASSIGNED,
+            StitchDir.UP,
+            edge_count
+        )
+        it.next()
+
+def init_t_stitch_mesh_data_structures():
+    sel = om.MGlobal.getActiveSelectionList()
+
+    if sel.length() == 0:
+        om.MGlobal.displayError("Select a mesh object first.")
+        return
+    selectedMeshes = cmds.ls(selection=True, long=True)
+    STATE.t_mesh = selectedMeshes[0]
+
+    dagPath = sel.getDagPath(0)
+
+    # Ensure we are working with the mesh shape
+    if not dagPath.hasFn(om.MFn.kMesh):
+        try:
+            dagPath.extendToShape()
+        except:
+            om.MGlobal.displayError("Selected object is not a mesh.")
+            return
+
+    edge_iter = om.MItMeshEdge(dagPath)
+
+    while not edge_iter.isDone():
+        edge_index = edge_iter.index()
+        v0 = edge_iter.vertexId(0)
+        v1 = edge_iter.vertexId(1)
+        
+        STATE.t_edge_map[edge_index] = EdgeType.UNASSIGNED
+
+        #print(f"Edge {edge_index}: vertices ({v0}, {v1})")
+
+        edge_iter.next()
 
 def init_stitch_mesh_data_structures():
     sel = om.MGlobal.getActiveSelectionList()
@@ -767,6 +1128,98 @@ def create_knit_gui():
     )
 
     cmds.showWindow(window_name)
+
+
+def draw_t_course_edges_as_curves(offset=0.0):
+    mel.eval('selectType -nurbsCurve false;')
+    debug_grp = "t_edge_type_indicator_grp"
+
+    # Create group if it doesn't exist
+    if not cmds.objExists(debug_grp):
+        debug_grp = cmds.group(empty=True, name=debug_grp)
+    else:
+        # Delete existing curves under the group
+        children = cmds.listRelatives(debug_grp, allDescendents=True, fullPath=True) or []
+        curve_shapes = cmds.ls(children, type="nurbsCurve", long=True) or []
+        curve_transforms = cmds.listRelatives(curve_shapes, parent=True, fullPath=True) or []
+        if curve_transforms:
+            cmds.delete(list(set(curve_transforms)))
+
+    cmds.select(STATE.preview_mesh, replace=True)
+    
+    sel = om.MGlobal.getActiveSelectionList()
+
+    if sel.length() == 0:
+        om.MGlobal.displayError("Select a mesh.")
+        return
+
+    dagPath = sel.getDagPath(0)
+
+    if not dagPath.hasFn(om.MFn.kMesh):
+        try:
+            dagPath.extendToShape()
+        except:
+            om.MGlobal.displayError("Selection is not a mesh.")
+            return
+
+    mesh_fn = om.MFnMesh(dagPath)
+    edge_iter = om.MItMeshEdge(dagPath)
+
+    created_curves = []
+
+    while not edge_iter.isDone():
+        edge_id = edge_iter.index()
+        edge_type = STATE.t_edge_map.get(edge_id)
+
+        if edge_type not in [EdgeType.COURSE, EdgeType.WALE]:
+            edge_iter.next()
+            continue
+
+        v0 = edge_iter.vertexId(0)
+        v1 = edge_iter.vertexId(1)
+
+        p0 = mesh_fn.getPoint(v0, om.MSpace.kWorld)
+        p1 = mesh_fn.getPoint(v1, om.MSpace.kWorld)
+
+        n0 = mesh_fn.getVertexNormal(v0, True, om.MSpace.kWorld)
+        n1 = mesh_fn.getVertexNormal(v1, True, om.MSpace.kWorld)
+
+        # Offset
+        p0_offset = p0 + (n0 * offset)
+        p1_offset = p1 + (n1 * offset)
+
+        curve = cmds.curve(
+            p=[(p0_offset.x, p0_offset.y, p0_offset.z),
+               (p1_offset.x, p1_offset.y, p1_offset.z)],
+            d=1,
+            name=f"t_edge_{edge_id}_crv"
+        )
+
+        shape = cmds.listRelatives(curve, shapes=True)[0]
+        cmds.setAttr(shape + ".overrideEnabled", 1)
+        cmds.setAttr(shape + ".overrideRGBColors", 1)
+
+        if edge_type == EdgeType.COURSE:
+            cmds.setAttr(shape + ".overrideColorRGB", 0.18, 0.65, 0.72)
+            cmds.setAttr(shape + ".lineWidth", 10)
+
+        elif edge_type == EdgeType.WALE:
+            cmds.setAttr(shape + ".overrideColorRGB", 0.62, 0.45, 0.78)
+            cmds.setAttr(shape + ".lineWidth", 4)
+
+        # Make curves unselectable
+        cmds.setAttr(curve + ".overrideEnabled", 1)
+        cmds.setAttr(curve + ".overrideDisplayType", 2)  # Reference
+
+        # Parent to debug group instead of mesh
+        cmds.parent(curve, debug_grp)
+
+        created_curves.append(curve)
+
+        edge_iter.next()
+
+    om.MGlobal.displayInfo(f"Created {len(created_curves)} edge curves.")
+    assign_knit_to_fully_assigned_faces()
 
 def draw_course_edges_as_curves(offset=0.0):
     mel.eval('selectType -nurbsCurve false;')
