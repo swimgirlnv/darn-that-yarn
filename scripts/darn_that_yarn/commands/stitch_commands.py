@@ -402,7 +402,7 @@ def create_smoothed_stitch_mesh(level):
     # cmds.polySubdivideFacet(all_faces, divisions=level + 1, mode=0)'
 
 def stretch_force(dagPath, vtx_id_a, vtx_id_b, resting_length, space=om.MSpace.kWorld):
-    k_stretch = .06
+    k_stretch = .01
     mesh_fn = om.MFnMesh(dagPath)
 
     p1 = mesh_fn.getPoint(vtx_id_a, space)
@@ -415,7 +415,7 @@ def stretch_force(dagPath, vtx_id_a, vtx_id_b, resting_length, space=om.MSpace.k
     return k_stretch * ((resting_length/length)-1) * (diff_vector/length)
 
 def wale_strut_force(dagPath, vtx_id_i, vtx_id_j, vtx_id_k, resting_length, space=om.MSpace.kWorld):
-    k_wale_strut = .06
+    k_wale_strut = .01
     mesh_fn = om.MFnMesh(dagPath)
     print("verts below:")
     print(vtx_id_i)
@@ -436,7 +436,7 @@ def wale_strut_force(dagPath, vtx_id_i, vtx_id_j, vtx_id_k, resting_length, spac
     return -1 * k_wale_strut * ((i_k_length/r) -1 ) * ((p_i-p_k)/i_k_length)
 
 def shear_force(dagPath, vtx_id_i, vtx_id_j, vtx_id_k, space=om.MSpace.kWorld):
-    k_shear = .06
+    k_shear = .01
     mesh_fn = om.MFnMesh(dagPath)
 
     p_i = om.MVector(mesh_fn.getPoint(vtx_id_i, space))
@@ -473,7 +473,7 @@ def apply_vertex_offsets(dagPath, vertex_offset_map, space=om.MSpace.kWorld):
         # write back
         mesh_fn.setPoint(vtx_id, new_p, space)
 
-def moveVerts(mesh, edge_data):
+def stitchMeshRelaxation(mesh, edge_data):
     mesh_sel = om.MSelectionList() 
     mesh_sel.add(mesh)
     dagPath = mesh_sel.getDagPath(0)
@@ -707,6 +707,8 @@ def tessellate_stitch_mesh(level):
     # set course edge touching edges to wale
     spreadEdgeAssignment()
 
+    ## START OF STITCH MESH RELAXATION
+
     # create duplicate catmull clark smoothed mesh
     create_smoothed_stitch_mesh(level)
 
@@ -715,7 +717,8 @@ def tessellate_stitch_mesh(level):
 
 
     # apply stitch mesh relaxation
-    moveVerts(STATE.t_mesh, STATE.t_edge_map)
+    for i in range(20):
+        stitchMeshRelaxation(STATE.t_mesh, STATE.t_edge_map)
 
 
     # REPLACE CURRENT BASE WITH SMOOTHED AND TESSELLATED MESH
@@ -726,6 +729,9 @@ def tessellate_stitch_mesh(level):
     # draw_course_edges_as_curves()
 
     # UNCOMMENT BELOW LINE AND COMMENT OUT SECTION DIRECTLY ABOVE TO NOT REPLACE AND STILL SHOW TESSELLATED EDGE DATA
+
+    ## END OF STITCH MESH RELAXATION
+    
     draw_t_course_edges_as_curves()
 
 
