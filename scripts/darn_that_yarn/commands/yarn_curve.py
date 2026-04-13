@@ -852,6 +852,42 @@ def generate_yarn_curves(
     """
     from collections import deque
 
+    # ── Select the right data source depending on tessellation state ──────────
+    # After tessellation + shrinkwrap, the live geometry is STATE.preview_mesh
+    # with edge/face data in STATE.t_edge_map / STATE.t_face_stitch_map.
+    # build_face_context() and _compute_face_dimensions() both read STATE.edge_map
+    # directly, so we temporarily promote the tessellated maps to the primary
+    # fields for the duration of this call, then restore them on exit.
+    _old_face_stitch_map = STATE.face_stitch_map
+    _old_edge_map        = STATE.edge_map
+    _old_base_mesh       = STATE.base_mesh
+
+    if (
+        STATE.is_tessellated
+        and STATE.preview_mesh
+        and cmds.objExists(STATE.preview_mesh)  # type: ignore[attr-defined]
+        and STATE.t_face_stitch_map
+    ):
+        STATE.face_stitch_map = STATE.t_face_stitch_map
+        STATE.edge_map        = STATE.t_edge_map
+        STATE.base_mesh       = STATE.preview_mesh  # type: ignore[assignment]
+
+    try:
+        return _generate_yarn_curves_impl(add_tubes, yarn_radius, tube_segments)
+    finally:
+        STATE.face_stitch_map = _old_face_stitch_map
+        STATE.edge_map        = _old_edge_map
+        STATE.base_mesh       = _old_base_mesh
+
+
+def _generate_yarn_curves_impl(
+    add_tubes: bool,
+    yarn_radius: float,
+    tube_segments: int,
+) -> List[str]:
+    """Internal implementation – always reads from STATE.face_stitch_map / STATE.base_mesh."""
+    from collections import deque
+
     if not STATE.face_stitch_map:
         om.MGlobal.displayError(
             "generate_yarn_curves: no stitch map. Initialise the mesh first."
