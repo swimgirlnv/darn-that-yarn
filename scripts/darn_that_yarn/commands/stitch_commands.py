@@ -399,6 +399,8 @@ def stretch_force(dagPath, vtx_id_a, vtx_id_b, resting_length, space=om.MSpace.k
     p2 = mesh_fn.getPoint(vtx_id_b, space)
     
     length = (p1 - p2).length()
+    if length < 1e-8:
+        return om.MVector(0.0, 0.0, 0.0)
     
     diff_vector = p1 - p2
 
@@ -407,10 +409,6 @@ def stretch_force(dagPath, vtx_id_a, vtx_id_b, resting_length, space=om.MSpace.k
 def wale_strut_force(dagPath, vtx_id_i, vtx_id_j, vtx_id_k, resting_length, space=om.MSpace.kWorld):
     k_wale_strut = .01
     mesh_fn = om.MFnMesh(dagPath)
-    print("verts below:")
-    print(vtx_id_i)
-    print(vtx_id_j)
-    print(vtx_id_k)
 
     p_i = om.MVector(mesh_fn.getPoint(vtx_id_i, space))
     p_j = om.MVector(mesh_fn.getPoint(vtx_id_j, space))
@@ -421,7 +419,8 @@ def wale_strut_force(dagPath, vtx_id_i, vtx_id_j, vtx_id_k, resting_length, spac
     k_j_length = (p_k-p_j).length()
 
     r = max(resting_length, i_j_length+k_j_length)
-    print(r)
+    if i_k_length < 1e-8 or r < 1e-8:
+        return om.MVector(0.0, 0.0, 0.0)
 
     return -1 * k_wale_strut * ((i_k_length/r) -1 ) * ((p_i-p_k)/i_k_length)
 
@@ -558,15 +557,10 @@ def stitchMeshRelaxation(mesh, edge_data):
                     wale2_v = non_central_vertex
                 num_wales_found += 1
         if num_wales_found == 2 and wale1_v != None and wale2_v != None:
-            print("Wale Strut Force calculating!")
             wale_strut_force_val = wale_strut_force(dagPath, wale1_v, vtx_id, wale2_v, course_rest)
-            print(wale_strut_force_val)
             add_to_map(wale1_v, vertex_force, wale_strut_force_val)
             add_to_map(wale2_v, vertex_force, -1* wale_strut_force_val)
 
-        
-        print("Vertex {} -> Edges {}".format(vtx_id, connected_edges))
-        
         vert_iter.next()
 
 
@@ -635,9 +629,7 @@ def apply_stitch_relaxation_forces():
             
             vertex_face_count[v_id] += 1
 
-    # Debug print (optional)
-    for v_id, count in vertex_face_count.items():
-        print("Vertex {} appears in {} faces".format(v_id, count))
+    return vertex_face_count
 
 def tessellate_stitch_mesh(level):
     """
