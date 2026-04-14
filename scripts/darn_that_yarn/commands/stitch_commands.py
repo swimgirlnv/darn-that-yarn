@@ -562,46 +562,6 @@ def stitchMeshRelaxation(mesh, edge_data):
             add_to_map(wale2_v, vertex_force, -1* wale_strut_force_val)
 
         vert_iter.next()
-
-
-    # wale_edges = [e for e, t in edge_data.items() if t == EdgeType.WALE]
-
-    # edge_iter = om.MItMeshEdge(dagPath)
-    # poly_iter = om.MItMeshPolygon(dagPath)
-    # for edge_id in wale_edges:
-    #     # Set edge iterator to this edge
-    #     edge_iter.setIndex(edge_id)
-        
-    #     # Get faces connected to this edge
-    #     face_ids = edge_iter.getConnectedFaces()
-        
-    #     print("Edge {} is connected to faces: {}".format(edge_id, face_ids))
-        
-    #     # For each face, get its edges
-    #     for face_id in face_ids:
-    #         poly_iter.setIndex(face_id)
-            
-    #         face_edge_ids = poly_iter.getEdges()
-    #         for face_edge_id in poly_iter.getEdges(): 
-    #             if face_edge_id != edge_id and edge_data[face_edge_id] == EdgeType.WALE:
-    #                 vertex_ids = poly_iter.getVertices()
-    #                 edge_iter_original_wale = om.MItMeshEdge(dagPath)
-    #                 edge_iter_original_wale.setIndex(edge_id)
-    #                 ow_v0 = edge_iter_original_wale.vertexId(0)
-    #                 ow_v1 = edge_iter_original_wale.vertexId(1)
-    #                 for i, v_id in enumerate(vertex_ids):
-    #                     if v_id in (ow_v0, ow_v1) and vertex_ids[(i + 1) % v_count] in (ow_v0, ow_v1):
-    #                         v_i = 
-    #                         break
-                        
-    #                 print("Opposing WALE found!! >; )")
-    #                 print(face_edge_id)
-    #                 break
-            
-    #         print("  Face {} has edges: {}".format(face_id, face_edge_ids))
-    
-
-
     apply_vertex_offsets(dagPath, vertex_force)
 
 
