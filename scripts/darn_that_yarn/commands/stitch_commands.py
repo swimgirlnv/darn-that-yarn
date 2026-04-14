@@ -5,6 +5,7 @@ import maya.api.OpenMaya as om
 from enum import Enum
 from dataclasses import dataclass
 import maya.mel as mel
+import math
 
 
 def _node_basename(node_name):
@@ -388,7 +389,255 @@ def create_smoothed_stitch_mesh(level):
         )
     # face_count = cmds.polyEvaluate(preview, face=True)
     # all_faces = [f"{preview}.f[{i}]" for i in range(face_count)]
-    # cmds.polySubdivideFacet(all_faces, divisions=level + 1, mode=0)
+    # cmds.polySubdivideFacet(all_faces, divisions=level + 1, mode=0)'
+
+def stretch_force(dagPath, vtx_id_a, vtx_id_b, resting_length, space=om.MSpace.kWorld):
+    k_stretch = .01
+    mesh_fn = om.MFnMesh(dagPath)
+
+    p1 = mesh_fn.getPoint(vtx_id_a, space)
+    p2 = mesh_fn.getPoint(vtx_id_b, space)
+    
+    length = (p1 - p2).length()
+    
+    diff_vector = p1 - p2
+
+    return k_stretch * ((resting_length/length)-1) * (diff_vector/length)
+
+def wale_strut_force(dagPath, vtx_id_i, vtx_id_j, vtx_id_k, resting_length, space=om.MSpace.kWorld):
+    k_wale_strut = .01
+    mesh_fn = om.MFnMesh(dagPath)
+    print("verts below:")
+    print(vtx_id_i)
+    print(vtx_id_j)
+    print(vtx_id_k)
+
+    p_i = om.MVector(mesh_fn.getPoint(vtx_id_i, space))
+    p_j = om.MVector(mesh_fn.getPoint(vtx_id_j, space))
+    p_k = om.MVector(mesh_fn.getPoint(vtx_id_k, space))
+
+    i_k_length = (p_i-p_k).length()
+    i_j_length = (p_i-p_j).length()
+    k_j_length = (p_k-p_j).length()
+
+    r = max(resting_length, i_j_length+k_j_length)
+    print(r)
+
+    return -1 * k_wale_strut * ((i_k_length/r) -1 ) * ((p_i-p_k)/i_k_length)
+
+def shear_force(dagPath, vtx_id_i, vtx_id_j, vtx_id_k, space=om.MSpace.kWorld):
+    k_shear = .01
+    mesh_fn = om.MFnMesh(dagPath)
+
+    p_i = om.MVector(mesh_fn.getPoint(vtx_id_i, space))
+    p_j = om.MVector(mesh_fn.getPoint(vtx_id_j, space))
+    p_k = om.MVector(mesh_fn.getPoint(vtx_id_k, space))
+    
+
+    return -1 * k_shear * (p_i - p_j) * (p_k - p_j) * (p_j - ((p_i + p_k) / 2))
+
+def add_to_map(key, map, val):
+    if key in map:
+        map[key] += val
+    else:
+        map[key] = val
+
+def apply_vertex_offsets(dagPath, vertex_offset_map, space=om.MSpace.kWorld):
+    """
+    Moves vertices by per-vertex offsets stored in a map:
+    {vertex_id: om.MVector}
+    """
+    mesh_fn = om.MFnMesh(dagPath)
+
+    for vtx_id, offset in vertex_offset_map.items():
+        # current position
+        p = mesh_fn.getPoint(vtx_id, space)
+
+        # apply offset
+        new_p = om.MPoint(
+            p.x + offset.x,
+            p.y + offset.y,
+            p.z + offset.z
+        )
+
+        # write back
+        mesh_fn.setPoint(vtx_id, new_p, space)
+
+def stitchMeshRelaxation(mesh, edge_data):
+    mesh_sel = om.MSelectionList() 
+    mesh_sel.add(mesh)
+    dagPath = mesh_sel.getDagPath(0)
+    
+    stitch_aspect_ratio = 1
+
+    # Create mesh function set
+    mesh_fn = om.MFnMesh(dagPath)
+
+    # Dictionary: vertex index -> count
+    vertex_force = {}
+
+    # Iterate over all polygons (faces)
+    num_faces = mesh_fn.numPolygons
+    
+    # Total surface area
+    total_area = 0.0
+    poly_iter = om.MItMeshPolygon(dagPath)
+    
+    for face_id in range(num_faces):
+        # --- Area accumulation ---
+        poly_iter.setIndex(face_id)
+        area = poly_iter.getArea()  # returns area of this face
+        total_area += area
+
+    
+    course_rest = math.sqrt(total_area/num_faces)
+    course_wale = course_rest
+    
+    poly_iter = om.MItMeshPolygon(dagPath)
+    
+    
+    # CALCULATE STRETCH FORCE FOR EACH EDGE
+    edge_iter = om.MItMeshEdge(dagPath)
+    while not edge_iter.isDone():
+        edge_id = edge_iter.index()
+        v1 = edge_iter.vertexId(0)
+        v2 = edge_iter.vertexId(1)
+        
+        add_to_map(v1, vertex_force, stretch_force(dagPath, v1, v2, course_rest))
+        add_to_map(v2, vertex_force, stretch_force(dagPath, v2, v1, course_rest))
+
+        edge_iter.next()
+        
+        
+    # CALCULATE DIAGONAL STRETCH FORCE AND SHEAR FOR EACH FACE VERT
+    diag_rest_length = math.sqrt(course_rest*course_rest + course_rest*course_rest)
+    for face_id in range(num_faces):
+        # Get vertex indices for this face
+        poly_iter.setIndex(face_id)
+        vertex_ids = poly_iter.getVertices()
+        v_count = len(vertex_ids)
+    
+        vert_iter = om.MItMeshVertex(dagPath)
+        for i, v_id in enumerate(vertex_ids):
+            # calculate diagonal stretch force (only add to current vert since we go around the quad)
+            diag_v = vertex_ids[(i + 2) % v_count]
+            add_to_map(v_id, vertex_force, stretch_force(dagPath, v_id, diag_v, course_rest))
+            
+            # calculate shear force
+            prev_v = vertex_ids[(i - 1) % v_count]
+            next_v = vertex_ids[(i + 1) % v_count]
+            shear_force_val = shear_force(dagPath, prev_v, v_id, next_v)
+            add_to_map(prev_v, vertex_force, -0.5 * shear_force_val)
+            add_to_map(next_v, vertex_force, -0.5 * shear_force_val)
+            
+    #ITERATE THROUGH EVERY VERT FOR WALE STRUT FORCE
+    # find two wales touching vert and calculate wale strut
+    vert_iter = om.MItMeshVertex(dagPath)
+
+    while not vert_iter.isDone():
+        vtx_id = vert_iter.index()
+        
+        connected_edges = vert_iter.getConnectedEdges()
+        wale1_v = None
+        wale2_v = None
+        num_wales_found = 0
+        for connecting_edge in connected_edges:
+            if edge_data[connecting_edge] == EdgeType.WALE:
+                wale_edge_iter = om.MItMeshEdge(dagPath)
+                wale_edge_iter.setIndex(connecting_edge)
+                v0 = wale_edge_iter.vertexId(0)
+                v1 = wale_edge_iter.vertexId(1)
+                non_central_vertex = None
+                if v0 != vtx_id:
+                    non_central_vertex = v0
+                elif v1 != vtx_id:
+                    non_central_vertex = v1
+                if num_wales_found == 0:
+                    wale1_v = non_central_vertex
+                else:
+                    wale2_v = non_central_vertex
+                num_wales_found += 1
+        if num_wales_found == 2 and wale1_v != None and wale2_v != None:
+            print("Wale Strut Force calculating!")
+            wale_strut_force_val = wale_strut_force(dagPath, wale1_v, vtx_id, wale2_v, course_rest)
+            print(wale_strut_force_val)
+            add_to_map(wale1_v, vertex_force, wale_strut_force_val)
+            add_to_map(wale2_v, vertex_force, -1* wale_strut_force_val)
+
+        
+        print("Vertex {} -> Edges {}".format(vtx_id, connected_edges))
+        
+        vert_iter.next()
+
+
+    # wale_edges = [e for e, t in edge_data.items() if t == EdgeType.WALE]
+
+    # edge_iter = om.MItMeshEdge(dagPath)
+    # poly_iter = om.MItMeshPolygon(dagPath)
+    # for edge_id in wale_edges:
+    #     # Set edge iterator to this edge
+    #     edge_iter.setIndex(edge_id)
+        
+    #     # Get faces connected to this edge
+    #     face_ids = edge_iter.getConnectedFaces()
+        
+    #     print("Edge {} is connected to faces: {}".format(edge_id, face_ids))
+        
+    #     # For each face, get its edges
+    #     for face_id in face_ids:
+    #         poly_iter.setIndex(face_id)
+            
+    #         face_edge_ids = poly_iter.getEdges()
+    #         for face_edge_id in poly_iter.getEdges(): 
+    #             if face_edge_id != edge_id and edge_data[face_edge_id] == EdgeType.WALE:
+    #                 vertex_ids = poly_iter.getVertices()
+    #                 edge_iter_original_wale = om.MItMeshEdge(dagPath)
+    #                 edge_iter_original_wale.setIndex(edge_id)
+    #                 ow_v0 = edge_iter_original_wale.vertexId(0)
+    #                 ow_v1 = edge_iter_original_wale.vertexId(1)
+    #                 for i, v_id in enumerate(vertex_ids):
+    #                     if v_id in (ow_v0, ow_v1) and vertex_ids[(i + 1) % v_count] in (ow_v0, ow_v1):
+    #                         v_i = 
+    #                         break
+                        
+    #                 print("Opposing WALE found!! >; )")
+    #                 print(face_edge_id)
+    #                 break
+            
+    #         print("  Face {} has edges: {}".format(face_id, face_edge_ids))
+    
+
+
+    apply_vertex_offsets(dagPath, vertex_force)
+
+
+def apply_stitch_relaxation_forces():
+    preview_sel = om.MSelectionList() 
+    preview_sel.add(STATE.preview_mesh)
+    dagPath = preview_sel.getDagPath(0)
+
+    # Create mesh function set
+    mesh_fn = om.MFnMesh(dagPath)
+
+    # Dictionary: vertex index -> count
+    vertex_face_count = {}
+
+    # Iterate over all polygons (faces)
+    num_faces = mesh_fn.numPolygons
+
+    for face_id in range(num_faces):
+        # Get vertex indices for this face
+        vertex_ids = mesh_fn.getPolygonVertices(face_id)
+        
+        for v_id in vertex_ids:
+            if v_id not in vertex_face_count:
+                vertex_face_count[v_id] = 0
+            
+            vertex_face_count[v_id] += 1
+
+    # Debug print (optional)
+    for v_id, count in vertex_face_count.items():
+        print("Vertex {} appears in {} faces".format(v_id, count))
 
 def tessellate_stitch_mesh(level):
     """
@@ -443,11 +692,18 @@ def tessellate_stitch_mesh(level):
     # set course edge touching edges to wale
     spreadEdgeAssignment()
 
+    ## START OF STITCH MESH RELAXATION
+
     # create duplicate catmull clark smoothed mesh
     create_smoothed_stitch_mesh(level)
 
     # shrink wrap tesselation preview onto duplicate mesh
     shrinkwrap_preview_to_smoothed()
+
+
+    # apply stitch mesh relaxation
+    for i in range(20):
+        stitchMeshRelaxation(STATE.t_mesh, STATE.t_edge_map)
 
 
     # REPLACE CURRENT BASE WITH SMOOTHED AND TESSELLATED MESH
@@ -458,6 +714,9 @@ def tessellate_stitch_mesh(level):
     # draw_course_edges_as_curves()
 
     # UNCOMMENT BELOW LINE AND COMMENT OUT SECTION DIRECTLY ABOVE TO NOT REPLACE AND STILL SHOW TESSELLATED EDGE DATA
+
+    ## END OF STITCH MESH RELAXATION
+    
     draw_t_course_edges_as_curves()
 
 
