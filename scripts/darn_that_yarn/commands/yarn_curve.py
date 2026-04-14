@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import maya.api.OpenMaya as om
 import maya.cmds as cmds
@@ -52,8 +52,10 @@ YARN_CURVE_PREFIXES = (
     "yarn_spiral",
 )
 
-DEFAULT_YARN_RADIUS = 0.08
+DEFAULT_YARN_RADIUS = 0.14
 YARN_RADIUS_STITCH_FRACTION = 0.14
+MAX_CURVE_POINTS = 12000
+MAX_TUBE_SAMPLE_RINGS = 6000
 
 
 def _delete_existing_yarn_nodes() -> None:
@@ -159,7 +161,14 @@ class YarnCurve:
             return ""
 
         degree = min(3, n - 1)
-        pts = [(p.x, p.y, p.z) for p in self.points]
+        source_points = self.points
+        if len(source_points) > MAX_CURVE_POINTS:
+            step = int(math.ceil(len(source_points) / MAX_CURVE_POINTS))
+            source_points = source_points[::step]
+            if source_points[-1] is not self.points[-1]:
+                source_points = source_points + [self.points[-1]]
+
+        pts = [(p.x, p.y, p.z) for p in source_points]
 
         if closed and degree == 3:
             # per=True creates a periodic cubic NURBS that closes smoothly.
@@ -381,45 +390,81 @@ def _compute_face_dimensions(dag_path: om.MDagPath, face_id: int) -> Tuple[float
 #   v  – wale direction:    -0.5 = bottom course edge, +0.5 = top course edge
 #   n  – normal depth:      negative = behind fabric,  positive = in front
 #
+# The stitch-mesh paper permits any stitch model with one yarn crossover on
+# each wale edge and two yarn crossovers on each course edge.  The canonical
+# quad templates below keep those constraints explicit: first/last points are
+# the wale crossovers, and the body includes two points on v=-0.5 and two on
+# v=+0.5.  This gives adjacent rows actual over/under crossing locations
+# instead of visual loops that only sit on top of one another.
+#
 # Each function appends its points to the supplied YarnCurve.  The last point
-# of face N and the first point of face N+1 sit on (or near) their shared
-# wale edge, so the NURBS interpolation naturally connects adjacent stitches.
+# of face N and the first point of face N+1 sit on their shared wale edge, so
+# the NURBS interpolation naturally connects adjacent stitches in a course.
 # ---------------------------------------------------------------------------
+
+WALE_LEFT = -0.50
+WALE_RIGHT = 0.50
+COURSE_BOTTOM = -0.50
+COURSE_TOP = 0.50
+
+
+def _append_local_points(
+    curve: YarnCurve,
+    width: float,
+    height: float,
+    face: FaceContext,
+    local_points: List[Tuple[float, float, float]],
+) -> None:
+    for u, v, n in local_points:
+        curve.append(_face_pt(face, u, v, n, width, height))
+
 
 def append_knit_points(
     curve: YarnCurve,
     width: float,
     height: float,
     face: FaceContext,
+    lower_face: Optional[FaceContext] = None,
+    lower_width: float = 0.0,
+    lower_height: float = 0.0,
 ) -> None:
     """
-    Knit stitch – yarn forms a backward-facing loop (negative normal offset).
+    Knit stitch – lower loop is pulled from back to front.
 
-    The yarn enters from the bottom-left, arcs behind the fabric to form the
-    characteristic knit "V", and exits at the bottom-right ready to enter
-    the next stitch.
+    The two bottom course-edge crossings tuck behind the older loop, then the
+    strand comes forward into the visible V.  The two top course-edge crossings
+    tuck behind the fabric to leave a receiving loop for the next row.
     """
-    # The first five points are the pull-through section.  They pass behind
-    # the previous loop's left leg, come to the front through the loop opening,
-    # then pass behind the previous loop's right leg.  The new loop is formed
-    # after that, so it is visibly threaded through the loop below.
-    LOCAL: List[Tuple[float, float, float]] = [
-        (-0.48, -0.54,  0.18),  # incoming at left wale edge
-        (-0.36, -0.50, -0.70),  # behind previous loop's left leg
-        ( 0.00, -0.34,  0.62),  # front center: pulled through the loop
-        ( 0.36, -0.50, -0.70),  # behind previous loop's right leg
-        ( 0.48, -0.54,  0.18),  # exits old loop at right wale edge
-        ( 0.36, -0.10,  0.08),  # lower right leg turns upward
-        ( 0.35,  0.46, -0.42),  # right arch arm behind the next row's pull-through
-        ( 0.00,  0.66, -0.42),  # top of the new loop, reaching into next row
-        (-0.35,  0.46, -0.42),  # left arch arm behind the next row's pull-through
-        (-0.36, -0.10,  0.08),  # lower left leg returns toward course path
-        (-0.10, -0.34,  0.62),  # front center still held through old loop
-        ( 0.36, -0.50, -0.70),  # dives behind old loop's right leg again
-        ( 0.48, -0.54,  0.18),  # outgoing to next stitch connection
-    ]
-    for u, v, n in LOCAL:
-        curve.append(_face_pt(face, u, v, n, width, height))
+    if lower_face is not None and lower_width > 0.0 and lower_height > 0.0:
+        # Use the face below for the bottom course crossings.  Those points
+        # sit in the top of the older loop, so the current yarn is visibly
+        # pulled through the previous row instead of floating inside only its
+        # own face.
+        pts = [
+            _face_pt(face, WALE_LEFT, -0.02, -0.26, width, height),
+            _face_pt(face, -0.34, COURSE_TOP, -0.38, width, height),
+            _face_pt(face, -0.28, 0.25, 0.34, width, height),
+            _face_pt(lower_face, -0.18, COURSE_TOP, -0.44, lower_width, lower_height),
+            _face_pt(face, 0.00, -0.26, 0.86, width, height),
+            _face_pt(lower_face, 0.18, COURSE_TOP, -0.44, lower_width, lower_height),
+            _face_pt(face, 0.28, 0.25, 0.34, width, height),
+            _face_pt(face, 0.34, COURSE_TOP, -0.38, width, height),
+            _face_pt(face, WALE_RIGHT, -0.02, -0.26, width, height),
+        ]
+        curve.extend(pts)
+    else:
+        LOCAL: List[Tuple[float, float, float]] = [
+            (WALE_LEFT,    -0.02, -0.26),  # single left-wale crossover
+            (-0.34, COURSE_TOP, -0.38),    # first top course crossover
+            (-0.28,  0.25,  0.34),         # left shoulder visible on the front
+            (-0.18, COURSE_BOTTOM, -0.38), # first bottom course crossover
+            ( 0.00, -0.26,  0.82),         # back-to-front pull-through
+            ( 0.18, COURSE_BOTTOM, -0.38), # second bottom course crossover
+            ( 0.28,  0.25,  0.34),         # right shoulder visible on the front
+            ( 0.34, COURSE_TOP, -0.38),    # second top course crossover
+            (WALE_RIGHT,   -0.02, -0.26),  # single right-wale crossover
+        ]
+        _append_local_points(curve, width, height, face, LOCAL)
 
 
 def append_purl_points(
@@ -427,32 +472,43 @@ def append_purl_points(
     width: float,
     height: float,
     face: FaceContext,
+    lower_face: Optional[FaceContext] = None,
+    lower_width: float = 0.0,
+    lower_height: float = 0.0,
 ) -> None:
     """
-    Purl stitch – mirror of knit; the loop faces forward (positive normal).
+    Purl stitch – lower loop is pulled from front to back.
 
-    Visually produces the horizontal bump seen on the purl side of stockinette
-    fabric.
+    Compared with knit, the pull-through pinches toward the back while the
+    front strand forms the pearl bump.  The edge crossing counts match the same
+    stitch-mesh topology as knit, only with reversed depth ordering.
     """
-    # Purl is the normal-depth mirror of knit: the pull-through ordering is
-    # reversed, so the strand goes in front of the old loop and emerges behind.
-    LOCAL: List[Tuple[float, float, float]] = [
-        (-0.48, -0.54, -0.18),  # incoming at left wale edge
-        (-0.36, -0.50,  0.70),  # in front of previous loop's left leg
-        ( 0.00, -0.34, -0.62),  # back center: pulled through the loop
-        ( 0.36, -0.50,  0.70),  # in front of previous loop's right leg
-        ( 0.48, -0.54, -0.18),  # exits old loop at right wale edge
-        ( 0.36, -0.10, -0.08),  # lower right leg turns upward
-        ( 0.35,  0.46,  0.42),  # right arch arm in front
-        ( 0.00,  0.66,  0.42),  # top of the purl loop
-        (-0.35,  0.46,  0.42),  # left arch arm in front
-        (-0.36, -0.10, -0.08),  # lower left leg returns toward course path
-        (-0.10, -0.34, -0.62),  # back center still held through old loop
-        ( 0.36, -0.50,  0.70),  # moves in front of old loop's right leg again
-        ( 0.48, -0.54, -0.18),  # outgoing to next stitch connection
-    ]
-    for u, v, n in LOCAL:
-        curve.append(_face_pt(face, u, v, n, width, height))
+    if lower_face is not None and lower_width > 0.0 and lower_height > 0.0:
+        pts = [
+            _face_pt(face, WALE_LEFT, -0.02, 0.24, width, height),
+            _face_pt(face, -0.34, COURSE_TOP, 0.32, width, height),
+            _face_pt(face, -0.26, 0.12, 0.72, width, height),
+            _face_pt(lower_face, -0.18, COURSE_TOP, 0.42, lower_width, lower_height),
+            _face_pt(face, 0.00, -0.20, -0.78, width, height),
+            _face_pt(lower_face, 0.18, COURSE_TOP, 0.42, lower_width, lower_height),
+            _face_pt(face, 0.26, 0.12, 0.72, width, height),
+            _face_pt(face, 0.34, COURSE_TOP, 0.32, width, height),
+            _face_pt(face, WALE_RIGHT, -0.02, 0.24, width, height),
+        ]
+        curve.extend(pts)
+    else:
+        LOCAL: List[Tuple[float, float, float]] = [
+            (WALE_LEFT,    -0.02,  0.24),  # single left-wale crossover
+            (-0.34, COURSE_TOP,  0.32),    # first top course crossover
+            (-0.26,  0.12,  0.72),         # pearl bump rises forward
+            (-0.18, COURSE_BOTTOM,  0.32), # first bottom course crossover
+            ( 0.00, -0.20, -0.74),         # front-to-back pull-through
+            ( 0.18, COURSE_BOTTOM,  0.32), # second bottom course crossover
+            ( 0.26,  0.12,  0.72),         # pearl bump returns
+            ( 0.34, COURSE_TOP,  0.32),    # second top course crossover
+            (WALE_RIGHT,   -0.02,  0.24),  # single right-wale crossover
+        ]
+        _append_local_points(curve, width, height, face, LOCAL)
 
 
 def append_yarnover_points(
@@ -462,29 +518,23 @@ def append_yarnover_points(
     face: FaceContext,
 ) -> None:
     """
-    Yarn-over stitch – an extra drape loop is cast over the needle before the
-    main knit loop, creating a deliberate eyelet in lace patterns.
+    Yarn-over stitch – the yarn wraps without being pulled through a loop.
 
-    The yarn first arcs forward (drape), crosses back through the fabric, then
-    completes a standard backward knit loop.
+    This preserves the same edge crossing topology as a quad stitch but leaves
+    the middle open so the resulting fabric has a visible eyelet.
     """
     LOCAL: List[Tuple[float, float, float]] = [
-        (-0.48, -0.34,  0.26),  # incoming strand visible at left wale edge
-        (-0.26, -0.42, -0.60),  # behind the lower loop before the yarn-over
-        (-0.08, -0.34,  0.38),  # pulled through to front
-        (-0.30,  0.00,  0.36),  # yarn-over drape arc rises in front
-        ( 0.00,  0.24,  0.40),  # forward drape peak
-        ( 0.00, -0.05, -0.14),  # crossover / pinch back through fabric
-        (-0.16,  0.38, -0.34),  # main backward loop - left side
-        ( 0.00,  0.60, -0.38),  # loop top reaches into the next row
-        ( 0.16,  0.38, -0.34),  # main backward loop - right side
-        ( 0.30,  0.00, -0.16),  # right leg descends
-        ( 0.08, -0.34,  0.38),  # front side of pull-through window
-        ( 0.26, -0.42, -0.60),  # behind the lower loop before exit
-        ( 0.48, -0.34,  0.26),  # exit to the next stitch
+        (WALE_LEFT,    -0.02,  0.10),  # single left-wale crossover
+        (-0.34, COURSE_TOP,  0.28),    # first top course crossover
+        (-0.18,  0.18,  0.62),         # yarn-over wrap rises in front
+        (-0.18, COURSE_BOTTOM,  0.18), # first bottom course crossover
+        ( 0.00, -0.02, -0.28),         # back-side pinch leaves an eyelet
+        ( 0.18, COURSE_BOTTOM,  0.18), # second bottom course crossover
+        ( 0.18,  0.18,  0.62),         # front wrap returns
+        ( 0.34, COURSE_TOP,  0.28),    # second top course crossover
+        (WALE_RIGHT,   -0.02,  0.10),  # single right-wale crossover
     ]
-    for u, v, n in LOCAL:
-        curve.append(_face_pt(face, u, v, n, width, height))
+    _append_local_points(curve, width, height, face, LOCAL)
 
 
 def append_increase_points(
@@ -623,6 +673,9 @@ def append_stitch_points(
     height: float,
     stitch_type: StitchType,
     face: FaceContext,
+    lower_face: Optional[FaceContext] = None,
+    lower_width: float = 0.0,
+    lower_height: float = 0.0,
 ) -> None:
     """
     Route to the correct per-stitch-type append function.
@@ -652,7 +705,10 @@ def append_stitch_points(
         raise ValueError(
             f"append_stitch_points: no generator for stitch type {stitch_type}"
         )
-    fn(curve, width, height, face)
+    if stitch_type.name in ("KNIT", "PURL"):
+        fn(curve, width, height, face, lower_face, lower_width, lower_height)
+    else:
+        fn(curve, width, height, face)
 
 
 # ---------------------------------------------------------------------------
@@ -721,16 +777,43 @@ def _sample_curve(
         dag.extendToShape()
 
     curve_fn = om.MFnNurbsCurve(dag)
-    knots = curve_fn.knots()
-    t_min = float(knots[0])
-    t_max = float(knots[-1])
+
+    try:
+        domain = curve_fn.knotDomain
+        if callable(domain):
+            domain = domain()
+        t_min, t_max = float(domain[0]), float(domain[1])
+    except Exception:
+        try:
+            curve_length = curve_fn.length()
+            t_min = float(curve_fn.findParamFromLength(0.0))
+            t_max = float(curve_fn.findParamFromLength(curve_length))
+        except Exception:
+            knots = curve_fn.knots()
+            degree_attr = curve_fn.degree
+            degree = int(degree_attr() if callable(degree_attr) else degree_attr)
+            t_min = float(knots[max(degree - 1, 0)])
+            t_max = float(knots[min(len(knots) - degree, len(knots) - 1)])
+    if t_max <= t_min:
+        curve_length = curve_fn.length()
+        t_min = float(curve_fn.findParamFromLength(0.0))
+        t_max = float(curve_fn.findParamFromLength(curve_length))
 
     samples: List[Tuple[om.MPoint, om.MVector]] = []
     for i in range(num_samples):
         denom = num_samples if closed else max(num_samples - 1, 1)
         t = t_min + (t_max - t_min) * i / denom
-        pt = curve_fn.getPointAtParam(t, om.MSpace.kWorld)  # type: ignore[attr-defined]
-        tan = curve_fn.tangent(t, om.MSpace.kWorld)  # type: ignore[attr-defined]
+        try:
+            pt = curve_fn.getPointAtParam(t, om.MSpace.kWorld)  # type: ignore[attr-defined]
+            tan = curve_fn.tangent(t, om.MSpace.kWorld)  # type: ignore[attr-defined]
+        except RuntimeError:
+            curve_length = curve_fn.length()
+            length_t = (i / denom) if denom else 0.0
+            if closed:
+                length_t = i / max(num_samples, 1)
+            safe_param = curve_fn.findParamFromLength(curve_length * length_t)
+            pt = curve_fn.getPointAtParam(safe_param, om.MSpace.kWorld)  # type: ignore[attr-defined]
+            tan = curve_fn.tangent(safe_param, om.MSpace.kWorld)  # type: ignore[attr-defined]
         tan_len = tan.length()
         if tan_len > 1e-8:
             tan /= tan_len
@@ -800,7 +883,9 @@ def add_tube_geometry(
 
     if sample_count <= 0:
         spans = int(cmds.getAttr(shape + ".spans")) if shape else 4
-        sample_count = max(spans * 3, 24)
+        sample_count = min(max(spans, 24), MAX_TUBE_SAMPLE_RINGS)
+    else:
+        sample_count = min(sample_count, MAX_TUBE_SAMPLE_RINGS)
 
     # ------------------------------------------------------------------
     # Auto-radius: derive from control-point spacing via OpenMaya.
@@ -942,6 +1027,7 @@ def generate_yarn_curves(
     add_tubes: bool = False,
     yarn_radius: float = 0.0,
     tube_segments: int = 6,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> List[str]:
     """
     Traverse the stitch mesh stored in STATE and generate one continuous
@@ -984,7 +1070,12 @@ def generate_yarn_curves(
         STATE.base_mesh       = STATE.preview_mesh  # type: ignore[assignment]
 
     try:
-        return _generate_yarn_curves_impl(add_tubes, yarn_radius, tube_segments)
+        return _generate_yarn_curves_impl(
+            add_tubes,
+            yarn_radius,
+            tube_segments,
+            progress_callback,
+        )
     finally:
         STATE.face_stitch_map = _old_face_stitch_map
         STATE.edge_map        = _old_edge_map
@@ -995,6 +1086,7 @@ def _generate_yarn_curves_impl(
     add_tubes: bool,
     yarn_radius: float,
     tube_segments: int,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> List[str]:
     """Internal implementation – always reads from STATE.face_stitch_map / STATE.base_mesh."""
     from collections import deque
@@ -1010,6 +1102,8 @@ def _generate_yarn_curves_impl(
         )
         return []
 
+    if progress_callback:
+        progress_callback(2, "Clearing previous yarn")
     _delete_existing_yarn_nodes()
 
     cmds.select(STATE.base_mesh, replace=True)
@@ -1022,48 +1116,172 @@ def _generate_yarn_curves_impl(
     if not dag_path.hasFn(om.MFn.kMesh):
         dag_path.extendToShape()
 
+    if progress_callback:
+        progress_callback(8, "Finding stitch faces")
+    face_check_iter = om.MItMeshPolygon(dag_path)
+
+    def _is_supported_yarn_face(fid: int, face_data) -> bool:
+        stitch_name = getattr(getattr(face_data, "stitch_type", None), "name", "")
+        if stitch_name == "NOTASSIGNED":
+            return False
+
+        try:
+            face_check_iter.setIndex(fid)
+        except Exception:
+            return False
+
+        edge_ids = face_check_iter.getEdges()
+        course_count = 0
+        wale_count = 0
+        for eid in edge_ids:
+            edge_name = getattr(STATE.edge_map.get(eid, EdgeType.UNASSIGNED), "name", "")
+            if edge_name == "COURSE":
+                course_count += 1
+            elif edge_name == "WALE":
+                wale_count += 1
+
+        # The stitch mesh paper requires exactly two wale edges per stitch
+        # face; every other edge on that face is a course edge.  Quad stitches
+        # therefore have two course edges, and 5-sided increase/decrease faces
+        # have three course edges split between top and bottom.
+        if stitch_name in ("KNIT", "PURL", "YARNOVER"):
+            return len(edge_ids) == 4 and course_count == 2 and wale_count == 2
+        if stitch_name in ("INCREASE", "DECREASE"):
+            return len(edge_ids) == 5 and course_count == 3 and wale_count == 2
+        return False
+
+    valid_yarn_faces = {
+        fid
+        for fid, face_data in STATE.face_stitch_map.items()
+        if _is_supported_yarn_face(fid, face_data)
+    }
+    if not valid_yarn_faces:
+        om.MGlobal.displayWarning("generate_yarn_curves: no assigned stitch faces.")
+        return []
+
+    if progress_callback:
+        progress_callback(14, "Building yarn adjacency")
     # ── Build edge → face map and face adjacency ───────────────────────────
     edge_to_faces: dict = {}
     face_iter = om.MItMeshPolygon(dag_path)
     while not face_iter.isDone():
         fid = face_iter.index()
-        if fid in STATE.face_stitch_map:
+        if fid in valid_yarn_faces:
             for eid in face_iter.getEdges():
                 edge_to_faces.setdefault(eid, []).append(fid)
         face_iter.next()
 
-    face_adj: dict = {fid: [] for fid in STATE.face_stitch_map}
+    face_adj: dict = {fid: [] for fid in valid_yarn_faces}
     for eid, flist in edge_to_faces.items():
         if len(flist) == 2:
             f0, f1 = flist
             face_adj[f0].append((f1, eid))
             face_adj[f1].append((f0, eid))
 
-    # ── BFS to assign (row, col) coordinates ──────────────────────────────
-    face_coords: dict = {}
-    start_face = next(iter(STATE.face_stitch_map))
-    queue: deque = deque([(start_face, 0, 0)])
-    face_coords[start_face] = (0, 0)
+    # ── Group faces into knitting rows ────────────────────────────────────
+    # In the stitch-mesh model, WALE edges connect adjacent stitches in the
+    # same course row.  COURSE edges connect rows above/below.  Do not derive
+    # rows from arbitrary BFS graph distance; that can pair the wrong faces and
+    # makes interlocking fail because "row above/below" becomes unstable.
+    if progress_callback:
+        progress_callback(20, "Ordering stitch rows")
+    ordering_centroids: dict = {}
+    order_iter = om.MItMeshPolygon(dag_path)
+    while not order_iter.isDone():
+        fid = order_iter.index()
+        if fid in valid_yarn_faces:
+            pts = order_iter.getPoints(om.MSpace.kWorld)
+            ordering_centroids[fid] = (
+                sum(p.x for p in pts) / len(pts),
+                sum(p.y for p in pts) / len(pts),
+                sum(p.z for p in pts) / len(pts),
+            )
+        order_iter.next()
 
-    while queue:
-        fid, row, col = queue.popleft()
-        for nbr_face, shared_edge in face_adj.get(fid, []):
-            if nbr_face in face_coords:
+    unvisited = set(valid_yarn_faces)
+    row_components = []
+    while unvisited:
+        start_face = unvisited.pop()
+        component = [start_face]
+        queue: deque = deque([start_face])
+
+        while queue:
+            fid = queue.popleft()
+            for nbr_face, shared_edge in face_adj.get(fid, []):
+                if nbr_face not in unvisited:
+                    continue
+                etype = STATE.edge_map.get(shared_edge, EdgeType.UNASSIGNED)
+                if getattr(etype, "name", str(etype)) != "WALE":
+                    continue
+                unvisited.remove(nbr_face)
+                component.append(nbr_face)
+                queue.append(nbr_face)
+
+        row_components.append(component)
+
+    row_axis = om.MVector(0.0, 0.0, 0.0)
+    course_axis = om.MVector(0.0, 0.0, 0.0)
+    for fid in valid_yarn_faces:
+        current_center = ordering_centroids.get(fid)
+        if current_center is None:
+            continue
+        for nbr_fid, shared_eid in face_adj.get(fid, []):
+            if fid > nbr_fid:
                 continue
-            etype = STATE.edge_map.get(shared_edge, EdgeType.UNASSIGNED)
-            if getattr(etype, "name", str(etype)) == "COURSE":
-                new_row, new_col = row + 1, col
-            else:
-                new_row, new_col = row, col + 1  # WALE or unassigned
-            face_coords[nbr_face] = (new_row, new_col)
-            queue.append((nbr_face, new_row, new_col))
+            nbr_center = ordering_centroids.get(nbr_fid)
+            if nbr_center is None:
+                continue
+            delta = om.MVector(
+                nbr_center[0] - current_center[0],
+                nbr_center[1] - current_center[1],
+                nbr_center[2] - current_center[2],
+            )
+            if delta.length() < 1e-8:
+                continue
+            delta = delta.normalize()
+            etype = STATE.edge_map.get(shared_eid, EdgeType.UNASSIGNED)
+            edge_name = getattr(etype, "name", str(etype))
+            if edge_name == "COURSE":
+                if row_axis.length() > 1e-8 and (row_axis * delta) < 0:
+                    delta = om.MVector(-delta.x, -delta.y, -delta.z)
+                row_axis += delta
+            elif edge_name == "WALE":
+                if course_axis.length() > 1e-8 and (course_axis * delta) < 0:
+                    delta = om.MVector(-delta.x, -delta.y, -delta.z)
+                course_axis += delta
 
-    # ── Group faces by row ─────────────────────────────────────────────────
+    if row_axis.length() < 1e-8:
+        row_axis = om.MVector(0.0, 1.0, 0.0)
+    else:
+        row_axis = row_axis.normalize()
+    if course_axis.length() < 1e-8:
+        course_axis = om.MVector(1.0, 0.0, 0.0)
+    else:
+        course_axis = course_axis.normalize()
+
+    def _component_centroid(component):
+        centers = [ordering_centroids[fid] for fid in component if fid in ordering_centroids]
+        if not centers:
+            return (0.0, 0.0, 0.0)
+        return (
+            sum(c[0] for c in centers) / len(centers),
+            sum(c[1] for c in centers) / len(centers),
+            sum(c[2] for c in centers) / len(centers),
+        )
+
+    row_components.sort(
+        key=lambda component: om.MVector(*_component_centroid(component)) * row_axis
+    )
+
     rows: dict = {}
-    for fid, (row, col) in face_coords.items():
-        rows.setdefault(row, []).append((col, fid))
-    for row_faces in rows.values():
-        row_faces.sort(key=lambda x: x[0])
+    for row_idx, component in enumerate(row_components):
+        row_faces = []
+        for fid in component:
+            center = ordering_centroids.get(fid, (0.0, 0.0, 0.0))
+            col_projection = om.MVector(*center) * course_axis
+            row_faces.append((col_projection, fid))
+        row_faces.sort(key=lambda item: item[0])
+        rows[row_idx] = row_faces
 
     if not rows:
         om.MGlobal.displayWarning("generate_yarn_curves: no rows found.")
@@ -1079,7 +1297,7 @@ def _generate_yarn_curves_impl(
     try:
         _generate_rows(
             rows, min_row, max_row, dag_path, face_adj, add_tubes,
-            yarn_radius, tube_segments, created_nodes,
+            yarn_radius, tube_segments, created_nodes, progress_callback,
         )
     finally:
         cmds.refresh(suspend=False)  # type: ignore[attr-defined]
@@ -1101,6 +1319,7 @@ def _generate_rows(
     yarn_radius: float,
     tube_segments: int,
     created_nodes: list,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> None:
     # ── Precompute face and row centroids for wale_axis orientation ────────
     # wale_axis direction from edge vectors is arbitrary (depends on edge
@@ -1108,6 +1327,8 @@ def _generate_rows(
     # next row (increasing row index), which makes v=+0.55 consistently
     # extend the loop top into the adjacent row rather than away from it.
     face_centroids: dict = {}
+    if progress_callback:
+        progress_callback(25, "Measuring stitch faces")
     face_iter_pre = om.MItMeshPolygon(dag_path)  # type: ignore[attr-defined]
     while not face_iter_pre.isDone():
         fid_pre = face_iter_pre.index()
@@ -1130,6 +1351,40 @@ def _generate_rows(
                 sum(face_centroids[f][2] for f in valid_fids) / len(valid_fids),
             )
 
+    sorted_row_ids = sorted(row_centroids)
+    if len(sorted_row_ids) >= 2:
+        first_rc = row_centroids[sorted_row_ids[0]]
+        last_rc = row_centroids[sorted_row_ids[-1]]
+        row_axis = om.MVector(
+            last_rc[0] - first_rc[0],
+            last_rc[1] - first_rc[1],
+            last_rc[2] - first_rc[2],
+        )
+        if row_axis.length() < 1e-8:
+            row_axis = om.MVector(0.0, 1.0, 0.0)
+        else:
+            row_axis = row_axis.normalize()
+    else:
+        row_axis = om.MVector(0.0, 1.0, 0.0)
+
+    def _angle_basis(axis: om.MVector) -> Tuple[om.MVector, om.MVector]:
+        up = om.MVector(0.0, 1.0, 0.0)
+        if abs(axis * up) > 0.92:
+            up = om.MVector(1.0, 0.0, 0.0)
+        basis_u = axis ^ up
+        if basis_u.length() < 1e-8:
+            basis_u = om.MVector(1.0, 0.0, 0.0)
+        else:
+            basis_u = basis_u.normalize()
+        basis_v = axis ^ basis_u
+        if basis_v.length() < 1e-8:
+            basis_v = om.MVector(0.0, 0.0, 1.0)
+        else:
+            basis_v = basis_v.normalize()
+        return basis_u, basis_v
+
+    angle_basis_u, angle_basis_v = _angle_basis(row_axis)
+
     face_dimensions: dict = {}
     for flist in rows.values():
         for _, fid in flist:
@@ -1151,6 +1406,7 @@ def _generate_rows(
         if yarn_radius > 0.0
         else max(DEFAULT_YARN_RADIUS, median_stitch_scale * YARN_RADIUS_STITCH_FRACTION)
     )
+    row_angle_cache = {}
 
     def _row_is_closed(face_list: list) -> bool:
         row_fids = {fid for _, fid in face_list}
@@ -1168,6 +1424,89 @@ def _generate_rows(
             if wale_neighbor_count < 2:
                 return False
         return True
+
+    def _row_ring_angles(face_list: list) -> Optional[list]:
+        cache_key = tuple(fid for _, fid in face_list)
+        if cache_key in row_angle_cache:
+            return row_angle_cache[cache_key]
+
+        valid_fids = [fid for _, fid in face_list if fid in face_centroids]
+        if len(valid_fids) < 6:
+            row_angle_cache[cache_key] = None
+            return None
+
+        cx = sum(face_centroids[fid][0] for fid in valid_fids) / len(valid_fids)
+        cy = sum(face_centroids[fid][1] for fid in valid_fids) / len(valid_fids)
+        cz = sum(face_centroids[fid][2] for fid in valid_fids) / len(valid_fids)
+
+        angle_records = []
+        for fid in valid_fids:
+            fc = face_centroids[fid]
+            radial = om.MVector(fc[0] - cx, fc[1] - cy, fc[2] - cz)
+            radial_on_ring = radial - row_axis * (radial * row_axis)
+            radius = radial_on_ring.length()
+            if radius < 1e-6:
+                row_angle_cache[cache_key] = None
+                return None
+            angle = math.atan2(radial_on_ring * angle_basis_v, radial_on_ring * angle_basis_u)
+            angle_records.append((angle, fid))
+
+        angle_records.sort(key=lambda item: item[0])
+        angles = [angle for angle, _fid in angle_records]
+        gaps = [
+            angles[i + 1] - angles[i]
+            for i in range(len(angles) - 1)
+        ]
+        gaps.append((angles[0] + math.tau) - angles[-1])
+
+        # A true cylinder row covers the full circumference.  Open cloth rows
+        # leave a large angular gap when projected around their centroid.
+        if max(gaps) > math.pi * 0.75:
+            row_angle_cache[cache_key] = None
+            return None
+        row_angle_cache[cache_key] = angle_records
+        return angle_records
+
+    def _row_is_geometrically_closed(face_list: list) -> bool:
+        return _row_ring_angles(face_list) is not None
+
+    def _order_geometric_closed_row(
+        face_list: list,
+        preferred_start: Optional[Tuple[float, float, float]] = None,
+    ) -> list:
+        angle_records = _row_ring_angles(face_list)
+        if not angle_records:
+            return face_list
+
+        if preferred_start is not None:
+            valid_fids = [fid for _angle, fid in angle_records]
+            cx = sum(face_centroids[fid][0] for fid in valid_fids) / len(valid_fids)
+            cy = sum(face_centroids[fid][1] for fid in valid_fids) / len(valid_fids)
+            cz = sum(face_centroids[fid][2] for fid in valid_fids) / len(valid_fids)
+            radial = om.MVector(
+                preferred_start[0] - cx,
+                preferred_start[1] - cy,
+                preferred_start[2] - cz,
+            )
+            radial_on_ring = radial - row_axis * (radial * row_axis)
+            preferred_angle = math.atan2(
+                radial_on_ring * angle_basis_v,
+                radial_on_ring * angle_basis_u,
+            )
+            start_idx = min(
+                range(len(angle_records)),
+                key=lambda idx: abs(
+                    math.atan2(
+                        math.sin(angle_records[idx][0] - preferred_angle),
+                        math.cos(angle_records[idx][0] - preferred_angle),
+                    )
+                ),
+            )
+        else:
+            start_idx = 0
+
+        ordered = angle_records[start_idx:] + angle_records[:start_idx]
+        return [(idx, fid) for idx, (_angle, fid) in enumerate(ordered)]
 
     def _order_closed_row(
         face_list: list,
@@ -1232,12 +1571,16 @@ def _generate_rows(
         if tube_name is None:
             tube_name = f"yarn_tube_row_{row_idx:04d}" if closed else "yarn_tube_fabric"
 
+        if progress_callback:
+            progress_callback(86, f"Creating curve {curve_name}")
         curve_node = curve.build_maya_curve(curve_name, closed=closed)
         if not curve_node:
             return
 
         if add_tubes:
             try:
+                if progress_callback:
+                    progress_callback(90, f"Meshing tube {tube_name}")
                 tube_node = add_tube_geometry(
                     curve_node,
                     radius=effective_yarn_radius,
@@ -1261,6 +1604,8 @@ def _generate_rows(
         face_list: list,
         curve: YarnCurve,
         closed_row: bool = False,
+        row_number: int = 1,
+        total_rows: int = 1,
     ) -> None:
         is_first_row = (row_idx == min_row)
         is_last_row  = (row_idx == max_row)
@@ -1289,7 +1634,20 @@ def _generate_rows(
             if fid in face_centroids
         }
 
+        total_faces = max(len(face_list), 1)
+        progress_step = max(total_faces // 20, 1)
+
         for face_idx, (_col, fid) in enumerate(face_list):
+            if progress_callback and (face_idx == 0 or face_idx % progress_step == 0):
+                progress = 30 + int(
+                    ((row_number - 1) + (face_idx / total_faces)) * 55 / max(total_rows, 1)
+                )
+                progress_callback(
+                    progress,
+                    f"Building yarn row {row_number} of {total_rows} "
+                    f"(face {face_idx + 1} of {total_faces})",
+                )
+
             face_data = STATE.face_stitch_map.get(fid)
             if face_data is None:
                 continue
@@ -1352,17 +1710,75 @@ def _generate_rows(
                             -ctx.course_axis.z,
                         )
 
-            # Cast-on once before the first stitch of the row.
-            if is_first_row and face_idx == 0:
+            lower_ctx = None
+            lower_width = 0.0
+            lower_height = 0.0
+            lower_candidates = []
+            for nbr_fid, shared_eid in face_adj.get(fid, []):
+                etype = STATE.edge_map.get(shared_eid, EdgeType.UNASSIGNED)
+                if getattr(etype, "name", str(etype)) != "COURSE":
+                    continue
+                if fid not in face_centroids or nbr_fid not in face_centroids:
+                    continue
+
+                current_center = face_centroids[fid]
+                nbr_center = face_centroids[nbr_fid]
+                to_neighbor = om.MVector(  # type: ignore[attr-defined]
+                    nbr_center[0] - current_center[0],
+                    nbr_center[1] - current_center[1],
+                    nbr_center[2] - current_center[2],
+                )
+                wale_projection = to_neighbor * ctx.wale_axis
+                if wale_projection < -1e-6:
+                    lower_candidates.append((wale_projection, nbr_fid))
+
+            if lower_candidates:
+                _lower_projection, lower_fid = min(lower_candidates, key=lambda item: item[0])
+                lower_ctx = build_face_context(dag_path, lower_fid)
+                lower_width, lower_height = face_dimensions.get(
+                    lower_fid, _compute_face_dimensions(dag_path, lower_fid)
+                )
+
+                if (lower_ctx.course_axis * ctx.course_axis) < 0:
+                    lower_ctx.course_axis = om.MVector(  # type: ignore[attr-defined]
+                        -lower_ctx.course_axis.x,
+                        -lower_ctx.course_axis.y,
+                        -lower_ctx.course_axis.z,
+                    )
+                if (lower_ctx.wale_axis * ctx.wale_axis) < 0:
+                    lower_ctx.wale_axis = om.MVector(  # type: ignore[attr-defined]
+                        -lower_ctx.wale_axis.x,
+                        -lower_ctx.wale_axis.y,
+                        -lower_ctx.wale_axis.z,
+                    )
+                if (lower_ctx.normal * ctx.normal) < 0:
+                    lower_ctx.normal = om.MVector(  # type: ignore[attr-defined]
+                        -lower_ctx.normal.x,
+                        -lower_ctx.normal.y,
+                        -lower_ctx.normal.z,
+                    )
+
+            # Cast-on/bind-off are border-only details.  Closed cylinder rows
+            # are generated as one continuous spiral, so adding border loops at
+            # the tube seam creates unsupported strands across the opening.
+            if is_first_row and face_idx == 0 and not closed_row:
                 append_cast_on_points(curve, width, height, ctx)
 
             # Main stitch shape (skip NOTASSIGNED faces).
             # Compare by .name to survive module-reload enum identity mismatches.
             if face_data.stitch_type.name != "NOTASSIGNED":
-                append_stitch_points(curve, width, height, face_data.stitch_type, ctx)
+                append_stitch_points(
+                    curve,
+                    width,
+                    height,
+                    face_data.stitch_type,
+                    ctx,
+                    lower_ctx,
+                    lower_width,
+                    lower_height,
+                )
 
-            # Bind-off once after the last stitch of the row.
-            if is_last_row and face_idx == len(face_list) - 1:
+            if is_last_row and face_idx == len(face_list) - 1 and not closed_row:
                 append_bind_off_points(curve, width, height, ctx)
 
     # Open cloth uses one continuous strand that snakes across rows.  Tube
@@ -1374,27 +1790,53 @@ def _generate_rows(
     spiral_curve = YarnCurve()
     spiral_start_ref: Optional[Tuple[float, float, float]] = None
 
-    for row_idx in sorted(rows):
+    sorted_rows = sorted(rows)
+    total_rows = max(len(sorted_rows), 1)
+    for row_number, row_idx in enumerate(sorted_rows, start=1):
+        if progress_callback:
+            progress = 30 + int((row_number - 1) * 55 / total_rows)
+            progress_callback(progress, f"Building yarn row {row_number} of {total_rows}")
         face_list = rows[row_idx]
-        is_closed_row = _row_is_closed(face_list)
+        is_geometric_ring = _row_is_geometrically_closed(face_list)
+        is_closed_row = _row_is_closed(face_list) or is_geometric_ring
 
         if is_closed_row:
-            path_faces = _order_closed_row(face_list, spiral_start_ref)
+            if is_geometric_ring:
+                path_faces = _order_geometric_closed_row(face_list, spiral_start_ref)
+            else:
+                path_faces = _order_closed_row(face_list, spiral_start_ref)
             if path_faces:
                 spiral_start_ref = face_centroids.get(path_faces[0][1], spiral_start_ref)
-            _append_row_points(row_idx, path_faces, spiral_curve, closed_row=True)
+            _append_row_points(
+                row_idx,
+                path_faces,
+                spiral_curve,
+                closed_row=True,
+                row_number=row_number,
+                total_rows=total_rows,
+            )
             continue
 
         path_faces = list(face_list)
         if open_row_count % 2 == 1:
             path_faces.reverse()
-        _append_row_points(row_idx, path_faces, open_curve)
+        _append_row_points(
+            row_idx,
+            path_faces,
+            open_curve,
+            row_number=row_number,
+            total_rows=total_rows,
+        )
         open_row_count += 1
 
     if open_curve.points:
+        if progress_callback:
+            progress_callback(88, "Creating yarn mesh")
         _materialize_curve(open_curve, min_row, closed=False)
 
     if spiral_curve.points:
+        if progress_callback:
+            progress_callback(92, "Creating spiral yarn mesh")
         _materialize_curve(
             spiral_curve,
             min_row,
@@ -1402,3 +1844,6 @@ def _generate_rows(
             curve_name="yarn_spiral",
             tube_name="yarn_tube_spiral",
         )
+
+    if progress_callback:
+        progress_callback(98, "Yarn geometry complete")

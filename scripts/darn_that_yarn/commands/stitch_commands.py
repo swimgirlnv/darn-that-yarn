@@ -7,6 +7,9 @@ from dataclasses import dataclass
 import maya.mel as mel
 import math
 
+MESH_RELAXATION_ITERATIONS = 20
+TESSELLATED_EDGE_CURVE_LIMIT = 450
+
 
 def _node_basename(node_name):
     return (node_name or "").split("|")[-1].split(":")[-1]
@@ -15,6 +18,15 @@ def _node_basename(node_name):
 def _derived_node_name(node_name, suffix):
     base = _node_basename(node_name)
     return f"{base}{suffix}" if base else suffix.lstrip("_")
+
+
+def _mesh_dag_path(mesh):
+    sel = om.MSelectionList()
+    sel.add(mesh)
+    dag_path = sel.getDagPath(0)
+    if not dag_path.hasFn(om.MFn.kMesh):
+        dag_path.extendToShape()
+    return dag_path
 
 
 def set_course_edges(selected_edges):
@@ -138,6 +150,44 @@ def checkAligned(dag_pathA, edge_indexA, dag_pathB, edge_indexB):
 
     return True
 
+
+def _edge_records(dag_path):
+    mesh_fn = om.MFnMesh(dag_path)
+    points = mesh_fn.getPoints(om.MSpace.kWorld)
+    edge_it = om.MItMeshEdge(dag_path)
+    records = []
+
+    while not edge_it.isDone():
+        edge_index = edge_it.index()
+        v0 = edge_it.vertexId(0)
+        v1 = edge_it.vertexId(1)
+        p0 = points[v0]
+        p1 = points[v1]
+        direction = om.MVector(p1 - p0)
+        length = direction.length()
+        if length > 1e-8:
+            records.append((
+                edge_index,
+                v0,
+                v1,
+                om.MPoint(
+                    (p0.x + p1.x) * 0.5,
+                    (p0.y + p1.y) * 0.5,
+                    (p0.z + p1.z) * 0.5,
+                ),
+                direction / length,
+                length,
+            ))
+        edge_it.next()
+
+    return records
+
+
+def _edges_are_aligned(mid_a, dir_a, mid_b, dir_b, tol=0.01):
+    if (dir_a ^ dir_b).length() > tol:
+        return False
+    return ((mid_b - mid_a) ^ dir_a).length() <= tol
+
 def spreadEdgeAssignment():
     
     # Get all edges marked as 'course'
@@ -207,48 +257,35 @@ def spreadEdgeAssignment():
 
 
 def _assign_tslt_edges_from_base():
-    preview_sel = om.MSelectionList()
-    preview_sel.add(STATE.preview_mesh)
-    dag_a = preview_sel.getDagPath(0)
+    if not STATE.preview_mesh or not STATE.base_mesh:
+        return
 
-    base_sel = om.MSelectionList()
-    base_sel.add(STATE.base_mesh)
-    dag_b = base_sel.getDagPath(0)
+    dag_a = _mesh_dag_path(STATE.preview_mesh)
+    dag_b = _mesh_dag_path(STATE.base_mesh)
 
-    edge_it_a = om.MItMeshEdge(dag_a)
-    # Iterate edges of mesh A
-    while not edge_it_a.isDone():
-        edge_a_index = edge_it_a.index()
-        mid_a = get_edge_midpoint(dag_a, edge_a_index)
+    preview_edges = _edge_records(dag_a)
+    base_edges = [
+        record
+        for record in _edge_records(dag_b)
+        if STATE.edge_map.get(record[0], EdgeType.UNASSIGNED) != EdgeType.UNASSIGNED
+    ]
+    if not base_edges:
+        return
 
+    for edge_a_index, _v0, _v1, mid_a, dir_a, _length_a in preview_edges:
         closest_edge = None
-        min_dist = float('inf')
-        aligned = False
-        midpointLength = 0.0
+        min_dist = float("inf")
 
-        edge_it_b = om.MItMeshEdge(dag_b)
-        while not edge_it_b.isDone():
-            aligned = checkAligned(dag_a, edge_a_index, dag_b, edge_it_b.index())
-            edge_b_index = edge_it_b.index()
-            mid_b = get_edge_midpoint(dag_b, edge_it_b.index())
-            dist = (mid_a - mid_b).length()  # this part is fine
-            if dist < min_dist and aligned:
+        for edge_b_index, _bv0, _bv1, mid_b, dir_b, _length_b in base_edges:
+            if not _edges_are_aligned(mid_a, dir_a, mid_b, dir_b):
+                continue
+            dist = (mid_a - mid_b).length()
+            if dist < min_dist:
                 min_dist = dist
                 closest_edge = edge_b_index
-                midpointLength = dist
-            edge_it_b.next()
-
-        # for edge_b_index, mid_b in mesh_b_edge_midpoints:
-        #     dist = (mid_a - mid_b).length()  # this part is fine
-        #     if dist < min_dist and aligned:
-        #         min_dist = dist
-        #         closest_edge = edge_b_index
-        
 
         if closest_edge is not None:
             STATE.t_edge_map[edge_a_index] = STATE.edge_map[closest_edge]
-
-        edge_it_a.next()
 
 def _color_preview_mesh_from_base():
     """
@@ -295,7 +332,12 @@ def _color_preview_mesh_from_base():
         centroid = om.MPoint(cx / len(verts), cy / len(verts), cz / len(verts))
         _, base_face_id = base_fn.getClosestPoint(centroid, om.MSpace.kWorld)
         face_data = STATE.face_stitch_map.get(base_face_id)
-        STATE.t_face_stitch_map[face_id] = face_data
+        if face_data:
+            STATE.t_face_stitch_map[face_id] = FaceStitchData(
+                face_data.stitch_type,
+                face_data.stitch_dir,
+                face_iter.polygonVertexCount(),
+            )
         color = (
             stitch_color_map[face_data.stitch_type]
             if face_data
@@ -661,6 +703,7 @@ def tessellate_stitch_mesh(level):
     duplicates = cmds.duplicate(STATE.selected_mesh, returnRootsOnly=True)
     preview = cmds.rename(duplicates[0], _derived_node_name(STATE.selected_mesh, "_tess_preview"))
     STATE.preview_mesh = preview
+    STATE.preview_mesh_relaxed = False
 
     # Subdivide all faces of the preview mesh.
     # mode=1 (linear): divisions=N splits each edge into N segments → N×N faces per quad.
@@ -684,31 +727,6 @@ def tessellate_stitch_mesh(level):
     # set course edge touching edges to wale
     spreadEdgeAssignment()
 
-    ## START OF STITCH MESH RELAXATION
-
-    # create duplicate catmull clark smoothed mesh
-    create_smoothed_stitch_mesh(level)
-
-    # shrink wrap tesselation preview onto duplicate mesh
-    shrinkwrap_preview_to_smoothed()
-
-
-    # apply stitch mesh relaxation
-    for i in range(20):
-        stitchMeshRelaxation(STATE.t_mesh, STATE.t_edge_map)
-
-
-    # REPLACE CURRENT BASE WITH SMOOTHED AND TESSELLATED MESH
-    #BELOW MAY HAVE ISSUES FOR YARN CURVE GENERATION
-    # STATE.face_stitch_map = STATE.t_face_stitch_map
-    # STATE.edge_map = STATE.t_edge_map
-    # STATE.base_mesh = STATE.t_mesh
-    # draw_course_edges_as_curves()
-
-    # UNCOMMENT BELOW LINE AND COMMENT OUT SECTION DIRECTLY ABOVE TO NOT REPLACE AND STILL SHOW TESSELLATED EDGE DATA
-
-    ## END OF STITCH MESH RELAXATION
-    
     draw_t_course_edges_as_curves()
 
 
@@ -733,6 +751,7 @@ def restore_stitch_mesh():
         cmds.delete(STATE.smoothed_mesh)
 
     STATE.preview_mesh = None
+    STATE.preview_mesh_relaxed = False
     STATE.smoothed_mesh = None
     STATE.is_tessellated = False
     STATE.t_mesh = None
@@ -754,15 +773,46 @@ def generate_knit_mesh():
     """
     End-to-end pipeline: generates yarn curves for every knitting row and
     optionally wraps each curve in a tube mesh to represent physical yarn.
-    Mesh-based and yarn-level relaxation remain placeholders for a future task.
+    Optionally relaxes the stitch mesh immediately before yarn generation.
     """
     from darn_that_yarn.commands.yarn_curve import generate_yarn_curves
 
-    nodes = generate_yarn_curves(
-        add_tubes=True,
-        yarn_radius=STATE.yarn_radius,
-        tube_segments=8,
+    cmds.progressWindow(
+        title="Generate Knit Mesh",
+        progress=0,
+        max=100,
+        status="Starting yarn generation",
+        isInterruptable=True,
     )
+    nodes = []
+
+    def _progress(progress, status):
+        if cmds.progressWindow(query=True, isCancelled=True):
+            raise RuntimeError("Generate Knit Mesh cancelled.")
+        cmds.progressWindow(
+            edit=True,
+            progress=max(0, min(100, int(progress))),
+            status=status,
+        )
+
+    try:
+        _progress(3, "Preparing stitch mesh")
+        apply_stitch_mesh_relaxation_before_generation(
+            progress_callback=lambda p, status: _progress(5 + int(p * 0.25), status)
+        )
+        _progress(30, "Generating yarn paths")
+        nodes = generate_yarn_curves(
+            add_tubes=True,
+            yarn_radius=STATE.yarn_radius,
+            tube_segments=8,
+            progress_callback=lambda p, status: _progress(30 + int(p * 0.68), status),
+        )
+        _progress(100, "Done")
+    except RuntimeError as exc:
+        cmds.warning(str(exc))
+        return
+    finally:
+        cmds.progressWindow(endProgress=True)
 
     cmds.inViewMessage(
         amg=(
@@ -773,6 +823,40 @@ def generate_knit_mesh():
         pos="topCenter",
         fade=True
     )
+
+
+def apply_stitch_mesh_relaxation_before_generation(progress_callback=None):
+    if not STATE.mesh_relaxation_enabled:
+        return
+    if STATE.preview_mesh_relaxed:
+        return
+    if not STATE.is_tessellated or not STATE.preview_mesh or not cmds.objExists(STATE.preview_mesh):
+        cmds.warning("Stitch mesh relaxation requires a tessellated preview mesh.")
+        return
+
+    if progress_callback:
+        progress_callback(0, "Building smooth stitch target")
+
+    cmds.refresh(suspend=True)
+    try:
+        create_smoothed_stitch_mesh(STATE.tessellation_level)
+        if progress_callback:
+            progress_callback(12, "Projecting tessellated mesh")
+        shrinkwrap_preview_to_smoothed()
+        for i in range(MESH_RELAXATION_ITERATIONS):
+            if progress_callback:
+                progress_callback(
+                    12 + int((i + 1) * 88 / MESH_RELAXATION_ITERATIONS),
+                    f"Relaxing stitch mesh {i + 1} of {MESH_RELAXATION_ITERATIONS}",
+                )
+            stitchMeshRelaxation(STATE.t_mesh, STATE.t_edge_map)
+    finally:
+        cmds.refresh(suspend=False)
+        cmds.refresh()
+
+    STATE.preview_mesh_relaxed = True
+    if STATE.selected_mesh and cmds.objExists(STATE.selected_mesh):
+        cmds.hide(STATE.selected_mesh)
 
 
 def set_yarn_thickness(radius):
@@ -886,12 +970,7 @@ def init_t_stitch_face_data_structure():
         return
     STATE.t_face_stitch_map.clear()
 
-    sel = om.MSelectionList()
-    sel.add(STATE.t_mesh)
-    dag = sel.getDagPath(0)
-    if not dag.hasFn(om.MFn.kMesh):
-        dag.extendToShape()
-
+    dag = _mesh_dag_path(STATE.t_mesh)
     it = om.MItMeshPolygon(dag)
 
     while not it.isDone():
@@ -905,37 +984,27 @@ def init_t_stitch_face_data_structure():
         it.next()
 
 def init_t_stitch_mesh_data_structures():
-    sel = om.MGlobal.getActiveSelectionList()
+    if STATE.preview_mesh and cmds.objExists(STATE.preview_mesh):
+        STATE.t_mesh = STATE.preview_mesh
+    else:
+        selectedMeshes = cmds.ls(selection=True, long=True)
+        if not selectedMeshes:
+            om.MGlobal.displayError("Select a mesh object first.")
+            return
+        STATE.t_mesh = selectedMeshes[0]
 
-    if sel.length() == 0:
-        om.MGlobal.displayError("Select a mesh object first.")
-        return
-    selectedMeshes = cmds.ls(selection=True, long=True)
-    STATE.t_mesh = selectedMeshes[0]
     STATE.t_edge_map.clear()
 
-    dagPath = sel.getDagPath(0)
+    try:
+        dagPath = _mesh_dag_path(STATE.t_mesh)
+    except Exception:
+        om.MGlobal.displayError("Selected object is not a mesh.")
+        return
 
-    # Ensure we are working with the mesh shape
-    if not dagPath.hasFn(om.MFn.kMesh):
-        try:
-            dagPath.extendToShape()
-        except Exception:
-            om.MGlobal.displayError("Selected object is not a mesh.")
-            return
-
-    edge_iter = om.MItMeshEdge(dagPath)
-
-    while not edge_iter.isDone():
-        edge_index = edge_iter.index()
-        v0 = edge_iter.vertexId(0)
-        v1 = edge_iter.vertexId(1)
-        
-        STATE.t_edge_map[edge_index] = EdgeType.UNASSIGNED
-
-        #print(f"Edge {edge_index}: vertices ({v0}, {v1})")
-
-        edge_iter.next()
+    mesh_fn = om.MFnMesh(dagPath)
+    STATE.t_edge_map.update(
+        dict.fromkeys(range(mesh_fn.numEdges), EdgeType.UNASSIGNED)
+    )
 
 def init_stitch_mesh_data_structures():
     sel = om.MGlobal.getActiveSelectionList()
@@ -970,22 +1039,20 @@ def init_stitch_mesh_data_structures():
 
         edge_iter.next()
 
-def assign_knit_to_fully_assigned_faces():
-    cmds.select(STATE.base_mesh, replace=True)
-    sel = om.MGlobal.getActiveSelectionList()
+def assign_knit_to_fully_assigned_faces(mesh=None, face_map=None, edge_map=None, color=True):
+    mesh = mesh or STATE.base_mesh
+    face_map = face_map if face_map is not None else STATE.face_stitch_map
+    edge_map = edge_map if edge_map is not None else STATE.edge_map
 
-    if sel.length() == 0:
+    if not mesh or not cmds.objExists(mesh):
         om.MGlobal.displayError("Select a mesh.")
         return
 
-    dagPath = sel.getDagPath(0)
-
-    if not dagPath.hasFn(om.MFn.kMesh):
-        try:
-            dagPath.extendToShape()
-        except Exception:
-            om.MGlobal.displayError("Selection is not a mesh.")
-            return
+    try:
+        dagPath = _mesh_dag_path(mesh)
+    except Exception:
+        om.MGlobal.displayError("Selection is not a mesh.")
+        return
 
     face_iter = om.MItMeshPolygon(dagPath)
 
@@ -994,55 +1061,49 @@ def assign_knit_to_fully_assigned_faces():
     while not face_iter.isDone():
         face_id = face_iter.index()
         edge_ids = face_iter.getEdges()
-        wale_count = sum(STATE.edge_map[e] == EdgeType.WALE for e in edge_ids)
-
-        # Get all edge indices for this face
-        edge_ids = face_iter.getEdges()
+        if face_id not in face_map:
+            face_iter.next()
+            continue
 
         # Check if all edges are assigned (not UNASSIGNED) AND 2 Wale Edges
-        all_assigned = is_face_fully_assigned(dagPath, face_id)
+        all_assigned = all(
+            edge_map.get(e, EdgeType.UNASSIGNED) != EdgeType.UNASSIGNED
+            for e in edge_ids
+        )
+        wale_count = sum(edge_map.get(e) == EdgeType.WALE for e in edge_ids)
 
-        if all_assigned and STATE.face_stitch_map[face_id].stitch_type == StitchType.NOTASSIGNED:
-            if face_id in STATE.face_stitch_map and wale_count == 2:
-                if STATE.face_stitch_map[face_id].edge_count == 4:
-                    face_data = STATE.face_stitch_map[face_id]
+        if all_assigned and face_map[face_id].stitch_type == StitchType.NOTASSIGNED:
+            if wale_count == 2:
+                if face_map[face_id].edge_count == 4:
+                    face_data = face_map[face_id]
                     face_data.stitch_type = StitchType.KNIT
                     updated_faces.append(face_id)
-                if STATE.face_stitch_map[face_id].edge_count == 5:
-                    face_data = STATE.face_stitch_map[face_id]
+                if face_map[face_id].edge_count == 5:
+                    face_data = face_map[face_id]
                     face_data.stitch_type = StitchType.INCREASE
                     updated_faces.append(face_id)
 
         # IF ANY FACES NO LONGER HAVE 2 WALE EDGES OR ARE NOT ASSIGNED, SET UNNASSIGNED
         if not all_assigned:
-            face_data = STATE.face_stitch_map[face_id]
+            face_data = face_map[face_id]
             face_data.stitch_type = StitchType.NOTASSIGNED
             updated_faces.append(face_id)
 
         face_iter.next()
 
     om.MGlobal.displayInfo(f"{len(updated_faces)} faces set to KNIT.")
-    color_knit_faces()
+    if color:
+        if face_map is STATE.face_stitch_map:
+            cmds.select(mesh, replace=True)
+            color_knit_faces()
+        else:
+            color_faces(mesh, face_map)
 
-def color_knit_faces():
-    sel = om.MGlobal.getActiveSelectionList()
-
-    if sel.length() == 0:
-        om.MGlobal.displayError("Select a mesh.")
-        return
-
-    dagPath = sel.getDagPath(0)
-
-    # mesh shape
-    if not dagPath.hasFn(om.MFn.kMesh):
-        try:
-            dagPath.extendToShape()
-        except Exception:
-            om.MGlobal.displayError("Selection is not a mesh.")
-            return
-
-    if not dagPath.hasFn(om.MFn.kMesh):
-        om.MGlobal.displayError("Selection is not a mesh shape.")
+def color_faces(mesh, face_map):
+    try:
+        dagPath = _mesh_dag_path(mesh)
+    except Exception:
+        om.MGlobal.displayError("Selection is not a mesh.")
         return
 
     mesh_fn = om.MFnMesh(dagPath)
@@ -1057,15 +1118,15 @@ def color_knit_faces():
     while not face_iter.isDone():
         face_id = face_iter.index()
 
-        if face_id in STATE.face_stitch_map:
+        if face_id in face_map:
             vertex_indices = face_iter.getVertices()
 
             for v_id in vertex_indices:
-                colors.append(stitch_color_map[STATE.face_stitch_map[face_id].stitch_type]) 
+                colors.append(stitch_color_map[face_map[face_id].stitch_type])
                 face_ids.append(face_id)
                 vert_ids.append(v_id)
                 
-            if STATE.face_stitch_map[face_id].stitch_type != StitchType.NOTASSIGNED:
+            if face_map[face_id].stitch_type != StitchType.NOTASSIGNED:
                 knit_count += 1
 
         face_iter.next()
@@ -1079,6 +1140,13 @@ def color_knit_faces():
     cmds.setAttr(mesh_name + ".displayColors", 1)
 
     om.MGlobal.displayInfo(f"Colored {knit_count} KNIT faces.")
+
+
+def color_knit_faces():
+    if not STATE.base_mesh:
+        om.MGlobal.displayError("Select a mesh.")
+        return
+    color_faces(STATE.base_mesh, STATE.face_stitch_map)
 
 
 def is_face_fully_assigned(dagPath, face_id):
@@ -1353,27 +1421,40 @@ def apply_pattern_fill(pattern_type="checker"):
             face_adj[f0].append((f1, edge_id))
             face_adj[f1].append((f0, edge_id))
 
-    # BFS: assign (row, col) to every reachable face.
+    # BFS: assign (row, col) to every reachable face.  Run one BFS per
+    # connected component so cylinders, caps, or separated mesh islands do not
+    # leave later rows untouched.
     # Crossing a COURSE edge advances the row; crossing a WALE edge advances the column.
     face_coords = {}
-    start_face = next(iter(STATE.face_stitch_map))
-    queue = deque([(start_face, 0, 0)])
-    face_coords[start_face] = (0, 0)
+    component_offset = 0
+    for start_face in STATE.face_stitch_map:
+        if start_face in face_coords:
+            continue
 
-    while queue:
-        fid, row, col = queue.popleft()
-        for nbr_face, shared_edge in face_adj.get(fid, []):
-            if nbr_face in face_coords:
-                continue
-            edge_type = STATE.edge_map.get(shared_edge, EdgeType.UNASSIGNED)
-            if edge_type == EdgeType.COURSE:
-                new_coords = (row + 1, col)
-            elif edge_type == EdgeType.WALE:
-                new_coords = (row, col + 1)
-            else:
-                new_coords = (row, col + 1)  # treat unassigned as wale
-            face_coords[nbr_face] = new_coords
-            queue.append((nbr_face, new_coords[0], new_coords[1]))
+        queue = deque([(start_face, component_offset, 0)])
+        face_coords[start_face] = (component_offset, 0)
+
+        while queue:
+            fid, row, col = queue.popleft()
+            for nbr_face, shared_edge in face_adj.get(fid, []):
+                if nbr_face in face_coords:
+                    continue
+                edge_type = STATE.edge_map.get(shared_edge, EdgeType.UNASSIGNED)
+                if edge_type == EdgeType.COURSE:
+                    new_coords = (row + 1, col)
+                elif edge_type == EdgeType.WALE:
+                    new_coords = (row, col + 1)
+                else:
+                    new_coords = (row, col + 1)  # treat unassigned as wale
+                face_coords[nbr_face] = new_coords
+                queue.append((nbr_face, new_coords[0], new_coords[1]))
+
+        component_rows = [
+            row
+            for face_id, (row, _col) in face_coords.items()
+            if face_id in STATE.face_stitch_map
+        ]
+        component_offset = (max(component_rows) + 2) if component_rows else component_offset + 2
 
     # Assign stitch types based on pattern parity.
     updated = 0
@@ -1425,6 +1506,25 @@ def create_knit_gui():
 def draw_t_course_edges_as_curves(offset=0.0):
     mel.eval('selectType -nurbsCurve false;')
     debug_grp = "t_edge_type_indicator_grp"
+    assigned_edge_count = sum(
+        1 for edge_type in STATE.t_edge_map.values()
+        if edge_type in (EdgeType.COURSE, EdgeType.WALE)
+    )
+
+    if assigned_edge_count > TESSELLATED_EDGE_CURVE_LIMIT:
+        if cmds.objExists(debug_grp):
+            cmds.delete(debug_grp)
+        if STATE.preview_mesh and cmds.objExists(STATE.preview_mesh):
+            cmds.select(STATE.preview_mesh, replace=True)
+        assign_knit_to_fully_assigned_faces(
+            mesh=STATE.preview_mesh,
+            face_map=STATE.t_face_stitch_map,
+            edge_map=STATE.t_edge_map,
+        )
+        om.MGlobal.displayInfo(
+            f"Skipped {assigned_edge_count} tessellated edge guide curves for speed."
+        )
+        return
 
     # Create group if it doesn't exist
     if not cmds.objExists(debug_grp):
@@ -1511,7 +1611,11 @@ def draw_t_course_edges_as_curves(offset=0.0):
         edge_iter.next()
 
     om.MGlobal.displayInfo(f"Created {len(created_curves)} edge curves.")
-    assign_knit_to_fully_assigned_faces()
+    assign_knit_to_fully_assigned_faces(
+        mesh=STATE.preview_mesh,
+        face_map=STATE.t_face_stitch_map,
+        edge_map=STATE.t_edge_map,
+    )
 
 def draw_course_edges_as_curves(offset=0.0):
     mel.eval('selectType -nurbsCurve false;')

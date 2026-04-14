@@ -11,10 +11,12 @@ class StitchToolState:
     face_stitch_types: Dict[str, str] = field(default_factory=dict)
     row_directions: Dict[str, int] = field(default_factory=dict)  # row_id -> 1 or -1
     tessellation_level: int = 1
-    yarn_radius: float = 0.08
+    selected_pattern: str = "checker"
+    yarn_radius: float = 0.14
     mesh_relaxation_enabled: bool = True
     yarn_relaxation_enabled: bool = True
     preview_mesh: Optional[str] = None
+    preview_mesh_relaxed: bool = False
     original_mesh_snapshot: Optional[str] = None
     is_tessellated: bool = False
     face_stitch_map: Dict[int, Any] = field(default_factory=dict)
@@ -33,10 +35,12 @@ class StitchToolState:
         self.face_stitch_types.clear()
         self.row_directions.clear()
         self.tessellation_level = 1
-        self.yarn_radius = 0.08
+        self.selected_pattern = "checker"
+        self.yarn_radius = 0.14
         self.mesh_relaxation_enabled = True
         self.yarn_relaxation_enabled = True
         self.preview_mesh = None
+        self.preview_mesh_relaxed = False
         self.original_mesh_snapshot = None
         self.is_tessellated = False
         self.face_stitch_map.clear()
