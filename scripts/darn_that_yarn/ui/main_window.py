@@ -10,6 +10,7 @@ from darn_that_yarn.commands.stitch_commands import (
     tessellate_stitch_mesh,
     restore_stitch_mesh,
     generate_knit_mesh,
+    set_yarn_thickness,
     reset_stitch_mesh,
     init_stitch_face_data_structure,
     init_stitch_mesh_data_structures,
@@ -244,6 +245,18 @@ def _build_ui(parent):
         annotation="When enabled, applies a physics-based relaxation to the yarn geometry for a more realistic drape."
     )
 
+    UI["yarn_radius_slider"] = cmds.floatSliderGrp(
+        label="Yarn Thickness",
+        field=True,
+        minValue=0.01,
+        maxValue=0.30,
+        fieldMinValue=0.001,
+        fieldMaxValue=2.0,
+        value=STATE.yarn_radius,
+        changeCommand=lambda value: _handle_yarn_radius_changed(value),
+        annotation="Controls yarn tube radius. After generation, changing this rebuilds the yarn tube meshes from the hidden curves."
+    )
+
     UI["generate_btn"] = cmds.button(
         label="Generate Knit Mesh",
         command=lambda *_: _handle_generate(),
@@ -403,6 +416,10 @@ def _handle_yarn_relax_changed(value):
     STATE.yarn_relaxation_enabled = bool(value)
 
 
+def _handle_yarn_radius_changed(value):
+    set_yarn_thickness(value)
+
+
 def _handle_generate():
     generate_knit_mesh()
 
@@ -415,7 +432,7 @@ def _handle_pattern_fill():
 
 def _handle_reset():
     reset_stitch_mesh()
-    init_stitch_face_data_structure()
     init_stitch_mesh_data_structures()
+    init_stitch_face_data_structure()
     draw_course_edges_as_curves()
     refresh_ui_state()

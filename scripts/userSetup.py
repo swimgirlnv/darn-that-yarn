@@ -1,4 +1,4 @@
-"""
+r"""
 Maya userSetup.py for Darn That Yarn.
 
 SETUP INSTRUCTIONS (do this once):

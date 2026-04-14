@@ -7,6 +7,15 @@ from dataclasses import dataclass
 import maya.mel as mel
 
 
+def _node_basename(node_name):
+    return (node_name or "").split("|")[-1].split(":")[-1]
+
+
+def _derived_node_name(node_name, suffix):
+    base = _node_basename(node_name)
+    return f"{base}{suffix}" if base else suffix.lstrip("_")
+
+
 def set_course_edges(selected_edges):
     """
     Placeholder for Rose's edge-labeling implementation.
@@ -178,7 +187,6 @@ def spreadEdgeAssignment():
 
         poly_iter = om.MItMeshPolygon(dagPath)
         for face_id in connected_faces:
-            print(face_id)
             poly_iter.setIndex(face_id)
 
             edge_ids = poly_iter.getEdges()
@@ -191,7 +199,6 @@ def spreadEdgeAssignment():
                 else:
                     unassignedEdgeId = e_id
             if numAssignedEdges == 3 and unassignedEdgeId != -1:
-                print("Assigning COURSE!")
                 STATE.t_edge_map[unassignedEdgeId] = EdgeType.COURSE
                 course_edges.append(unassignedEdgeId)
         
@@ -208,19 +215,6 @@ def _assign_tslt_edges_from_base():
     dag_b = base_sel.getDagPath(0)
 
     edge_it_a = om.MItMeshEdge(dag_a)
-    edge_it_b = om.MItMeshEdge(dag_b)
-
-    mesh_b_edge_midpoints = []
-    
-    # Precompute midpoints for mesh B
-    while not edge_it_b.isDone():
-        edge_b_index = edge_it_b.index()
-        mid = get_edge_midpoint(dag_b, edge_it_b.index())
-        mesh_b_edge_midpoints.append((edge_it_b.index(), mid))
-        #STATE.t_edge_map[edge_b_index] = STATE.edge_map[edge_b_index]
-        edge_it_b.next()
-
-
     # Iterate edges of mesh A
     while not edge_it_a.isDone():
         edge_a_index = edge_it_a.index()
@@ -250,12 +244,7 @@ def _assign_tslt_edges_from_base():
         #         closest_edge = edge_b_index
         
 
-        print("Closest edge to {}.e[{}] is {}.e[{}]".format(
-            STATE.preview_mesh, edge_a_index,
-            STATE.base_mesh, closest_edge
-        ))
-        print(min_dist)
-        if min_dist <= midpointLength:
+        if closest_edge is not None:
             STATE.t_edge_map[edge_a_index] = STATE.edge_map[closest_edge]
 
         edge_it_a.next()
@@ -331,6 +320,9 @@ def shrinkwrap_preview_to_smoothed():
     
     target = STATE.smoothed_mesh
     wrapper = STATE.preview_mesh
+    if not target or not wrapper:
+        cmds.warning("Cannot shrinkwrap: missing smoothed target or preview mesh.")
+        return
     
     # Create shrinkWrap deformer
     shrink_node = cmds.deformer(wrapper, type='shrinkWrap')[0]
@@ -346,8 +338,6 @@ def shrinkwrap_preview_to_smoothed():
     cmds.setAttr(shrink_node + ".keepBorder", 1)
     cmds.setAttr(shrink_node + ".smoothUVs", 1)
     
-    print("ShrinkWrap applied: {} -> {}".format(wrapper, target))
-
     cmds.delete(wrapper, ch=True)
 
     cmds.delete(STATE.smoothed_mesh)
@@ -375,7 +365,7 @@ def create_smoothed_stitch_mesh(level):
     cmds.showHidden(STATE.selected_mesh)
 
     duplicates = cmds.duplicate(STATE.selected_mesh, returnRootsOnly=True)
-    smoothedM = cmds.rename(duplicates[0], STATE.selected_mesh + "_smooth_target")
+    smoothedM = cmds.rename(duplicates[0], _derived_node_name(STATE.selected_mesh, "_smooth_target"))
     STATE.smoothed_mesh = smoothedM
 
     # Subdivide all faces of the preview mesh.
@@ -419,13 +409,16 @@ def tessellate_stitch_mesh(level):
     if STATE.preview_mesh and cmds.objExists(STATE.preview_mesh):
         cmds.delete(STATE.preview_mesh)
         STATE.preview_mesh = None
+    STATE.t_mesh = None
+    STATE.t_edge_map.clear()
+    STATE.t_face_stitch_map.clear()
 
     # Ensure the original is visible before duplicating so the duplicate inherits
     # the correct visibility state.
     cmds.showHidden(STATE.selected_mesh)
 
     duplicates = cmds.duplicate(STATE.selected_mesh, returnRootsOnly=True)
-    preview = cmds.rename(duplicates[0], STATE.selected_mesh + "_tess_preview")
+    preview = cmds.rename(duplicates[0], _derived_node_name(STATE.selected_mesh, "_tess_preview"))
     STATE.preview_mesh = preview
 
     # Subdivide all faces of the preview mesh.
@@ -442,18 +435,10 @@ def tessellate_stitch_mesh(level):
     init_t_stitch_mesh_data_structures()
     init_t_stitch_face_data_structure()
 
-    print(STATE.t_face_stitch_map)
-    print(STATE.t_edge_map)
-    print(STATE.t_mesh)
-
     # Color the preview before hiding the base — getClosestPoint needs the base visible.
     _color_preview_mesh_from_base()
 
-    print(STATE.t_face_stitch_map)
-
     _assign_tslt_edges_from_base()
-    print(STATE.t_edge_map)
-    print(STATE.t_mesh)
 
     # set course edge touching edges to wale
     spreadEdgeAssignment()
@@ -493,9 +478,15 @@ def restore_stitch_mesh():
     """
     if STATE.preview_mesh and cmds.objExists(STATE.preview_mesh):
         cmds.delete(STATE.preview_mesh)
+    if STATE.smoothed_mesh and cmds.objExists(STATE.smoothed_mesh):
+        cmds.delete(STATE.smoothed_mesh)
 
     STATE.preview_mesh = None
+    STATE.smoothed_mesh = None
     STATE.is_tessellated = False
+    STATE.t_mesh = None
+    STATE.t_edge_map.clear()
+    STATE.t_face_stitch_map.clear()
 
     if STATE.selected_mesh and cmds.objExists(STATE.selected_mesh):
         cmds.showHidden(STATE.selected_mesh)
@@ -518,8 +509,8 @@ def generate_knit_mesh():
 
     nodes = generate_yarn_curves(
         add_tubes=True,
-        yarn_radius=0.0,          # 0 = auto-compute safe radius
-        tube_segments=6,
+        yarn_radius=STATE.yarn_radius,
+        tube_segments=8,
     )
 
     cmds.inViewMessage(
@@ -533,8 +524,48 @@ def generate_knit_mesh():
     )
 
 
+def set_yarn_thickness(radius):
+    STATE.yarn_radius = max(0.001, float(radius))
+
+    from darn_that_yarn.commands.yarn_curve import update_yarn_tube_radius
+
+    updated_nodes = update_yarn_tube_radius(
+        STATE.yarn_radius,
+        tube_segments=8,
+    )
+    if updated_nodes:
+        cmds.inViewMessage(
+            amg=f"Updated yarn thickness to <hl>{STATE.yarn_radius:.3f}</hl>.",
+            pos="topCenter",
+            fade=True
+        )
+
+
 def reset_stitch_mesh():
+    active_mesh = STATE.selected_mesh or STATE.base_mesh
+
+    for node in (
+        STATE.preview_mesh,
+        STATE.smoothed_mesh,
+        "edge_type_indicator_grp",
+        "t_edge_type_indicator_grp",
+    ):
+        if node and cmds.objExists(node):
+            cmds.delete(node)
+
+    try:
+        from darn_that_yarn.commands.yarn_curve import _delete_existing_yarn_nodes
+        _delete_existing_yarn_nodes()
+    except Exception:
+        pass
+
     STATE.reset()
+    if active_mesh and cmds.objExists(active_mesh):
+        STATE.selected_mesh = active_mesh
+        STATE.base_mesh = active_mesh
+        cmds.showHidden(active_mesh)
+        cmds.select(active_mesh, replace=True)
+
     cmds.inViewMessage(
         amg="Darn that Yarn state reset.",
         pos="topCenter",
@@ -579,6 +610,7 @@ stitch_color_map = {
 def init_stitch_face_data_structure():
     if not STATE.base_mesh:
         return
+    STATE.face_stitch_map.clear()
 
     sel = om.MSelectionList()
     sel.add(STATE.base_mesh)
@@ -601,6 +633,7 @@ def init_stitch_face_data_structure():
 def init_t_stitch_face_data_structure():
     if not STATE.t_mesh:
         return
+    STATE.t_face_stitch_map.clear()
 
     sel = om.MSelectionList()
     sel.add(STATE.t_mesh)
@@ -628,6 +661,7 @@ def init_t_stitch_mesh_data_structures():
         return
     selectedMeshes = cmds.ls(selection=True, long=True)
     STATE.t_mesh = selectedMeshes[0]
+    STATE.t_edge_map.clear()
 
     dagPath = sel.getDagPath(0)
 
@@ -635,7 +669,7 @@ def init_t_stitch_mesh_data_structures():
     if not dagPath.hasFn(om.MFn.kMesh):
         try:
             dagPath.extendToShape()
-        except:
+        except Exception:
             om.MGlobal.displayError("Selected object is not a mesh.")
             return
 
@@ -660,6 +694,7 @@ def init_stitch_mesh_data_structures():
         return
     selectedMeshes = cmds.ls(selection=True, long=True)
     STATE.base_mesh = selectedMeshes[0]
+    STATE.edge_map.clear()
 
     dagPath = sel.getDagPath(0)
 
@@ -667,7 +702,7 @@ def init_stitch_mesh_data_structures():
     if not dagPath.hasFn(om.MFn.kMesh):
         try:
             dagPath.extendToShape()
-        except:
+        except Exception:
             om.MGlobal.displayError("Selected object is not a mesh.")
             return
 
@@ -697,7 +732,7 @@ def assign_knit_to_fully_assigned_faces():
     if not dagPath.hasFn(om.MFn.kMesh):
         try:
             dagPath.extendToShape()
-        except:
+        except Exception:
             om.MGlobal.displayError("Selection is not a mesh.")
             return
 
@@ -751,7 +786,7 @@ def color_knit_faces():
     if not dagPath.hasFn(om.MFn.kMesh):
         try:
             dagPath.extendToShape()
-        except:
+        except Exception:
             om.MGlobal.displayError("Selection is not a mesh.")
             return
 
@@ -800,7 +835,7 @@ def is_face_fully_assigned(dagPath, face_id):
 
     try:
         face_iter.setIndex(face_id)
-    except:
+    except Exception:
         om.MGlobal.displayError(f"Invalid face_id: {face_id}")
         return False
 
@@ -862,6 +897,8 @@ def get_selected_faces_edge_num():
         face_ids = face_comp.getElements()
 
         for face_id in face_ids:
+            if face_id not in STATE.face_stitch_map:
+                return -1
 
             # Check if this face has same number of edges as other selected faces
             if selected_faces_edgecount == -1:
@@ -996,6 +1033,10 @@ def set_selected_edges_to_course():
             connected_vertices.add(v1)
 
             STATE.edge_map[edge_id] = EdgeType.COURSE
+
+    if dagPath is None or not selected_edges:
+        om.MGlobal.displayError("Select mesh edges.")
+        return
 
     # Find perpendicular edges (edges sharing vertices but not selected)
     vert_iter = om.MItMeshVertex(dagPath)
@@ -1158,7 +1199,7 @@ def draw_t_course_edges_as_curves(offset=0.0):
     if not dagPath.hasFn(om.MFn.kMesh):
         try:
             dagPath.extendToShape()
-        except:
+        except Exception:
             om.MGlobal.displayError("Selection is not a mesh.")
             return
 
@@ -1249,7 +1290,7 @@ def draw_course_edges_as_curves(offset=0.0):
     if not dagPath.hasFn(om.MFn.kMesh):
         try:
             dagPath.extendToShape()
-        except:
+        except Exception:
             om.MGlobal.displayError("Selection is not a mesh.")
             return
 
