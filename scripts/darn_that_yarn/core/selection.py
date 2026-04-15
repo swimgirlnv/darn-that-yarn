@@ -9,7 +9,7 @@ def get_selected_mesh_transform() -> Optional[str]:
         return None
 
     meshes = cmds.ls(selection, dag=True, shapes=True, type="mesh", long=True) or []
-    if len(meshes) != 1:
+    if len(meshes) < 1:
         return None
 
     parents = cmds.listRelatives(meshes[0], parent=True, fullPath=True) or []

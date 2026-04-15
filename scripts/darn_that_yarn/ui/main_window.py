@@ -10,6 +10,7 @@ from darn_that_yarn.commands.stitch_commands import (
     tessellate_stitch_mesh,
     restore_stitch_mesh,
     generate_knit_mesh,
+    set_yarn_thickness,
     reset_stitch_mesh,
     init_stitch_face_data_structure,
     init_stitch_mesh_data_structures,
@@ -35,6 +36,19 @@ stitch_name_to_type_map = { "knit": StitchType.KNIT,
                             "yarn-over": StitchType.YARNOVER,
                             "increase": StitchType.INCREASE,
                             "decrease": StitchType.DECREASE}
+
+PATTERN_PREVIEWS = {
+    "checker": (
+        "Checker stockinette",
+        "K P K P\nP K P K\nK P K P",
+        "Alternates knit and purl by row and column."
+    ),
+    "rib": (
+        "Rib columns",
+        "K P K P\nK P K P\nK P K P",
+        "Alternates knit and purl by column."
+    ),
+}
 
 
 def _safe_delete_script_jobs():
@@ -65,10 +79,14 @@ def show_darn_that_yarn_ui():
         retain=False,
         floating=True,
         initialWidth=360,
-        initialHeight=660
+        initialHeight=620
     )
 
-    content = cmds.columnLayout(adj=True, parent=WORKSPACE_NAME)
+    content = cmds.scrollLayout(
+        childResizable=True,
+        parent=WORKSPACE_NAME,
+        verticalScrollBarThickness=16
+    )
     _build_ui(content)
     _register_script_jobs()
 
@@ -82,8 +100,16 @@ def show_darn_that_yarn_ui():
 
 
 def _activate_mesh(mesh):
+    previous_mesh = STATE.selected_mesh
+    if previous_mesh and previous_mesh != mesh and cmds.objExists(previous_mesh):
+        cmds.showHidden(previous_mesh)
+
     STATE.selected_mesh = mesh
     STATE.base_mesh = mesh
+    if cmds.objExists(mesh):
+        cmds.showHidden(mesh)
+        cmds.select(mesh, replace=True)
+
     _set_status(f"Active mesh: {mesh}")
     init_stitch_mesh_data_structures()
     init_stitch_face_data_structure()
@@ -92,39 +118,66 @@ def _activate_mesh(mesh):
 
 
 def _build_ui(parent):
-    cmds.columnLayout(adj=True, parent=parent)
+    UI["main_column"] = cmds.columnLayout(adj=True, parent=parent)
 
     UI["title"] = cmds.text(
-        label="Darn that Yarn!",
+        label="Darn that Yarn",
         align="center",
-        height=30,
+        height=28,
         font="boldLabelFont"
     )
+    UI["subtitle"] = cmds.text(
+        label="Build a stitch mesh, choose a pattern, then generate yarn.",
+        align="center",
+        height=20,
+        wordWrap=True
+    )
 
+    UI["status"] = cmds.text(
+        label="Select a polygon mesh and click Set Active Mesh.",
+        align="left",
+        height=34,
+        wordWrap=True
+    )
+
+    cmds.separator(height=8, style="in")
+
+    UI["mesh_frame"] = cmds.frameLayout(
+        label="1. Choose Mesh",
+        collapsable=True,
+        marginWidth=8,
+        marginHeight=8
+    )
+    cmds.columnLayout(adj=True)
+    cmds.text(
+        label="Select the garment or cylinder mesh in the viewport.",
+        align="left",
+        wordWrap=True
+    )
     UI["set_mesh_btn"] = cmds.button(
         label="Set Active Mesh",
         command=lambda *_: _handle_set_mesh(),
         height=32,
         annotation="Select a polygon mesh in the viewport, then click this to begin."
     )
+    cmds.setParent("..")
+    cmds.setParent("..")
 
-    UI["status"] = cmds.text(
-        label="Select a polygon mesh and click Set Active Mesh.",
-        align="left",
-        height=24,
-        wordWrap=True
-    )
-
-    cmds.separator(height=10, style="in")
+    cmds.separator(height=8, style="in")
 
     # Stitch Mesh Generation section
     UI["stitch_frame"] = cmds.frameLayout(
-        label="Stitch Mesh Generation",
-        collapsable=False,
+        label="2. Label Stitch Direction",
+        collapsable=True,
         marginWidth=8,
         marginHeight=8
     )
     cmds.columnLayout(adj=True)
+    cmds.text(
+        label="Select course edge loops. Course edges run around the rows; wale edges are filled in automatically.",
+        align="left",
+        wordWrap=True
+    )
 
     UI["selected_edges_label"] = cmds.text(
         label="Selected Edges: None",
@@ -140,6 +193,11 @@ def _build_ui(parent):
 
     cmds.separator(height=8, style="none")
 
+    cmds.text(
+        label="Optional per-face stitch override",
+        align="left",
+        font="boldLabelFont"
+    )
     UI["selected_faces_label"] = cmds.text(
         label="Selected Faces: None",
         align="left"
@@ -167,23 +225,6 @@ def _build_ui(parent):
 
     cmds.separator(height=8, style="none")
 
-    UI["pattern_menu"] = cmds.optionMenu(
-        label="Pattern Fill",
-        annotation="Choose a fill pattern to apply across all assigned faces."
-    )
-    for p in ["checker", "rib"]:
-        cmds.menuItem(label=p)
-
-    UI["pattern_fill_btn"] = cmds.button(
-        label="Apply Pattern Fill",
-        command=lambda *_: _handle_pattern_fill(),
-        enable=False,
-        height=32,
-        annotation="Auto-fills all assigned quad faces with the selected pattern: checker alternates k/p in both directions, rib alternates by column only."
-    )
-
-    cmds.separator(height=8, style="none")
-
     UI["reset_btn"] = cmds.button(
         label="RESET Stitch Mesh",
         command=lambda *_: _handle_reset(),
@@ -196,14 +237,64 @@ def _build_ui(parent):
 
     cmds.separator(height=10, style="in")
 
-    # Knit Mesh Generation section
-    UI["knit_frame"] = cmds.frameLayout(
-        label="Knit Mesh Generation",
-        collapsable=False,
+    UI["pattern_frame"] = cmds.frameLayout(
+        label="3. Choose Pattern",
+        collapsable=True,
         marginWidth=8,
         marginHeight=8
     )
     cmds.columnLayout(adj=True)
+    cmds.text(
+        label="Pick a fill pattern for all assigned quad faces. K = knit, P = purl.",
+        align="left",
+        wordWrap=True
+    )
+    cmds.rowColumnLayout(
+        numberOfColumns=2,
+        columnWidth=[(1, 155), (2, 155)],
+        columnSpacing=[(1, 6), (2, 6)]
+    )
+    UI["checker_pattern_btn"] = cmds.button(
+        label="Checker\nK P K P\nP K P K",
+        command=lambda *_: _handle_pattern_fill("checker"),
+        enable=False,
+        height=72,
+        bgc=(0.25, 0.35, 0.42),
+        annotation=PATTERN_PREVIEWS["checker"][2]
+    )
+    UI["rib_pattern_btn"] = cmds.button(
+        label="Rib\nK P K P\nK P K P",
+        command=lambda *_: _handle_pattern_fill("rib"),
+        enable=False,
+        height=72,
+        bgc=(0.32, 0.30, 0.42),
+        annotation=PATTERN_PREVIEWS["rib"][2]
+    )
+    cmds.setParent("..")
+    UI["pattern_preview"] = cmds.text(
+        label="Pattern preview: choose a pattern after assigning course/wale edges.",
+        align="left",
+        height=50,
+        wordWrap=True
+    )
+    cmds.setParent("..")
+    cmds.setParent("..")
+
+    cmds.separator(height=10, style="in")
+
+    # Knit Mesh Generation section
+    UI["knit_frame"] = cmds.frameLayout(
+        label="4. Tessellate And Generate Yarn",
+        collapsable=True,
+        marginWidth=8,
+        marginHeight=8
+    )
+    cmds.columnLayout(adj=True)
+    cmds.text(
+        label="Tessellate controls stitch density. Generate creates yarn tubes; thickness can be adjusted afterward.",
+        align="left",
+        wordWrap=True
+    )
 
     UI["tessellation_slider"] = cmds.intSliderGrp(
         label="Tessellation Level",
@@ -233,7 +324,7 @@ def _build_ui(parent):
 
     UI["mesh_relax_cb"] = cmds.checkBox(
         label="Stitch Mesh Relaxation",
-        value=True,
+        value=STATE.mesh_relaxation_enabled,
         changeCommand=lambda value: _handle_mesh_relax_changed(value),
         annotation="When enabled, applies a relaxation pass to the stitch mesh before generating yarn geometry to even out stitch sizing."
     )
@@ -242,6 +333,18 @@ def _build_ui(parent):
         value=True,
         changeCommand=lambda value: _handle_yarn_relax_changed(value),
         annotation="When enabled, applies a physics-based relaxation to the yarn geometry for a more realistic drape."
+    )
+
+    UI["yarn_radius_slider"] = cmds.floatSliderGrp(
+        label="Yarn Thickness",
+        field=True,
+        minValue=0.01,
+        maxValue=0.50,
+        fieldMinValue=0.001,
+        fieldMaxValue=2.0,
+        value=STATE.yarn_radius,
+        changeCommand=lambda value: _handle_yarn_radius_changed(value),
+        annotation="Controls yarn tube radius. After generation, changing this rebuilds the yarn tube meshes from the hidden curves."
     )
 
     UI["generate_btn"] = cmds.button(
@@ -259,8 +362,7 @@ def _build_ui(parent):
 
     UI["help_text"] = cmds.text(
         label=(
-            "Workflow: Select one mesh → Set Active Mesh → select edge loops "
-            "→ Set Course Edge Loop → Apply Pattern Fill → Tessellate → Generate Knit Mesh."
+            "Workflow: 1 Set mesh | 2 Label course edges | 3 Choose pattern | 4 Tessellate and generate."
         ),
         align="left",
         wordWrap=True
@@ -297,6 +399,17 @@ def _set_status(message: str):
         cmds.text(UI["status"], edit=True, label=message)
 
 
+def _set_pattern_preview(pattern: str):
+    if "pattern_preview" not in UI or not cmds.text(UI["pattern_preview"], exists=True):
+        return
+    title, preview, note = PATTERN_PREVIEWS.get(pattern, PATTERN_PREVIEWS["checker"])
+    cmds.text(
+        UI["pattern_preview"],
+        edit=True,
+        label=f"Selected: {title}\n{preview}\n{note}"
+    )
+
+
 def refresh_ui_state(*_):
     has_mesh = bool(STATE.base_mesh)
 
@@ -305,8 +418,10 @@ def refresh_ui_state(*_):
         cmds.text(UI["selected_edges_label"], edit=True, label="Selected Edges: None")
         cmds.text(UI["selected_faces_label"], edit=True, label="Selected Faces: None")
         for key in ("set_course_btn", "set_stitch_btn", "flip_row_btn",
-                    "pattern_fill_btn", "tessellate_btn", "restore_btn", "generate_btn"):
+                    "checker_pattern_btn", "rib_pattern_btn",
+                    "tessellate_btn", "restore_btn", "generate_btn"):
             cmds.button(UI[key], edit=True, enable=False)
+        _set_pattern_preview(STATE.selected_pattern)
         return
 
     info = get_selection_summary()
@@ -344,10 +459,12 @@ def refresh_ui_state(*_):
     cmds.button(UI["set_course_btn"], edit=True, enable=has_edges)
     cmds.button(UI["set_stitch_btn"], edit=True, enable=has_faces and has_active_faces_selected)
     cmds.button(UI["flip_row_btn"], edit=True, enable=has_faces and has_active_faces_selected)
-    cmds.button(UI["pattern_fill_btn"], edit=True, enable=has_any_stitch_data)
+    cmds.button(UI["checker_pattern_btn"], edit=True, enable=has_any_stitch_data)
+    cmds.button(UI["rib_pattern_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["tessellate_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["restore_btn"], edit=True, enable=STATE.is_tessellated)
     cmds.button(UI["generate_btn"], edit=True, enable=has_any_stitch_data)
+    _set_pattern_preview(STATE.selected_pattern)
 
 def show_no_mesh_selected_warning():
     cmds.confirmDialog(
@@ -403,19 +520,26 @@ def _handle_yarn_relax_changed(value):
     STATE.yarn_relaxation_enabled = bool(value)
 
 
+def _handle_yarn_radius_changed(value):
+    set_yarn_thickness(value)
+
+
 def _handle_generate():
     generate_knit_mesh()
 
 
-def _handle_pattern_fill():
-    pattern = cmds.optionMenu(UI["pattern_menu"], query=True, value=True)
+def _handle_pattern_fill(pattern=None):
+    if pattern is None:
+        pattern = STATE.selected_pattern
+    STATE.selected_pattern = pattern
+    _set_pattern_preview(pattern)
     apply_pattern_fill(pattern)
     refresh_ui_state()
 
 
 def _handle_reset():
     reset_stitch_mesh()
-    init_stitch_face_data_structure()
     init_stitch_mesh_data_structures()
+    init_stitch_face_data_structure()
     draw_course_edges_as_curves()
     refresh_ui_state()
