@@ -320,7 +320,9 @@ def shrinkwrap_preview_to_smoothed():
     #     cmds.error("Please select exactly two meshes: [target, wrapper]")
     
     target = STATE.smoothed_mesh
-    wrapper = STATE.preview_mesh
+    wrapper = STATE.base_mesh
+    if STATE.is_tessellated:
+        wrapper = STATE.preview_mesh
     if not target or not wrapper:
         cmds.warning("Cannot shrinkwrap: missing smoothed target or preview mesh.")
         return
@@ -343,17 +345,18 @@ def shrinkwrap_preview_to_smoothed():
 
     cmds.delete(STATE.smoothed_mesh)
     STATE.smoothed_mesh = None
+    cmds.select(wrapper)
 
 def create_smoothed_stitch_mesh(level):
     """
     creates catmull clark smoothed mesh so tessellated mesh can be projected onto it
     """
-    if not STATE.selected_mesh:
+    if not STATE.base_mesh:
         cmds.warning("No mesh selected. Select a polygon mesh first.")
         return
 
-    if not cmds.objExists(STATE.selected_mesh):
-        cmds.warning(f"Mesh '{STATE.selected_mesh}' no longer exists.")
+    if not cmds.objExists(STATE.base_mesh):
+        cmds.warning(f"Mesh '{STATE.base_mesh}' no longer exists.")
         return
 
     # Clean up any existing smoothed mesh before creating a new one.
@@ -363,10 +366,10 @@ def create_smoothed_stitch_mesh(level):
 
     # Ensure the original is visible before duplicating so the duplicate inherits
     # the correct visibility state.
-    cmds.showHidden(STATE.selected_mesh)
+    cmds.showHidden(STATE.base_mesh)
 
-    duplicates = cmds.duplicate(STATE.selected_mesh, returnRootsOnly=True)
-    smoothedM = cmds.rename(duplicates[0], _derived_node_name(STATE.selected_mesh, "_smooth_target"))
+    duplicates = cmds.duplicate(STATE.base_mesh, returnRootsOnly=True)
+    smoothedM = cmds.rename(duplicates[0], _derived_node_name(STATE.base_mesh, "_smooth_target"))
     STATE.smoothed_mesh = smoothedM
 
     # Subdivide all faces of the preview mesh.
@@ -647,15 +650,15 @@ def tessellate_stitch_mesh(level):
     ## START OF STITCH MESH RELAXATION
 
     # create duplicate catmull clark smoothed mesh
-    create_smoothed_stitch_mesh(level)
+    # create_smoothed_stitch_mesh(level)
 
-    # shrink wrap tesselation preview onto duplicate mesh
-    shrinkwrap_preview_to_smoothed()
+    # # shrink wrap tesselation preview onto duplicate mesh
+    # shrinkwrap_preview_to_smoothed()
 
 
-    # apply stitch mesh relaxation
-    for i in range(20):
-        stitchMeshRelaxation(STATE.t_mesh, STATE.t_edge_map)
+    # # apply stitch mesh relaxation
+    # for i in range(20):
+    #     stitchMeshRelaxation(STATE.t_mesh, STATE.t_edge_map)
 
 
     # REPLACE CURRENT BASE WITH SMOOTHED AND TESSELLATED MESH
@@ -717,6 +720,19 @@ def generate_knit_mesh():
     Mesh-based and yarn-level relaxation remain placeholders for a future task.
     """
     from darn_that_yarn.commands.yarn_curve import generate_yarn_curves
+
+    if STATE.is_tessellated:
+        create_smoothed_stitch_mesh(STATE.tessellation_level)
+        # shrink wrap tesselation preview onto duplicate mesh
+        shrinkwrap_preview_to_smoothed()
+
+
+    # apply stitch mesh relaxation
+    for i in range(20):
+        if STATE.is_tessellated:
+            stitchMeshRelaxation(STATE.t_mesh, STATE.t_edge_map)
+        else:
+            stitchMeshRelaxation(STATE.base_mesh, STATE.edge_map)
 
     nodes = generate_yarn_curves(
         add_tubes=True,
