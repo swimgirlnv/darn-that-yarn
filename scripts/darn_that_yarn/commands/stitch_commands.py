@@ -728,7 +728,7 @@ def generate_knit_mesh():
 
 
     # apply stitch mesh relaxation
-    for i in range(20):
+    for i in range(40):
         if STATE.is_tessellated:
             stitchMeshRelaxation(STATE.t_mesh, STATE.t_edge_map)
         else:
