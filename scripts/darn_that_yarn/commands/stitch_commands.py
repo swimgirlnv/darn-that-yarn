@@ -8,6 +8,8 @@ import maya.mel as mel
 import math
 
 MESH_RELAXATION_ITERATIONS = 20
+MESH_RELAXATION_STEP = 0.35
+MESH_RELAXATION_MAX_OFFSET_FRACTION = 0.25
 TESSELLATED_EDGE_CURVE_LIMIT = 450
 
 
@@ -486,7 +488,13 @@ def add_to_map(key, map, val):
     else:
         map[key] = val
 
-def apply_vertex_offsets(dagPath, vertex_offset_map, space=om.MSpace.kWorld):
+def apply_vertex_offsets(
+    dagPath,
+    vertex_offset_map,
+    space=om.MSpace.kWorld,
+    step_scale=1.0,
+    max_offset=None,
+):
     """
     Moves vertices by per-vertex offsets stored in a map:
     {vertex_id: om.MVector}
@@ -494,6 +502,13 @@ def apply_vertex_offsets(dagPath, vertex_offset_map, space=om.MSpace.kWorld):
     mesh_fn = om.MFnMesh(dagPath)
 
     for vtx_id, offset in vertex_offset_map.items():
+        if step_scale != 1.0:
+            offset = offset * step_scale
+        if max_offset is not None:
+            offset_len = offset.length()
+            if offset_len > max_offset and offset_len > 1e-8:
+                offset = (offset / offset_len) * max_offset
+
         # current position
         p = mesh_fn.getPoint(vtx_id, space)
 
@@ -512,8 +527,6 @@ def stitchMeshRelaxation(mesh, edge_data):
     mesh_sel.add(mesh)
     dagPath = mesh_sel.getDagPath(0)
     
-    stitch_aspect_ratio = 1
-
     # Create mesh function set
     mesh_fn = om.MFnMesh(dagPath)
 
@@ -534,8 +547,10 @@ def stitchMeshRelaxation(mesh, edge_data):
         total_area += area
 
     
-    course_rest = math.sqrt(total_area/num_faces)
-    course_wale = course_rest
+    if num_faces == 0 or total_area <= 1e-12:
+        return
+
+    course_rest = math.sqrt(total_area / num_faces)
     
     poly_iter = om.MItMeshPolygon(dagPath)
     
@@ -565,7 +580,7 @@ def stitchMeshRelaxation(mesh, edge_data):
         for i, v_id in enumerate(vertex_ids):
             # calculate diagonal stretch force (only add to current vert since we go around the quad)
             diag_v = vertex_ids[(i + 2) % v_count]
-            add_to_map(v_id, vertex_force, stretch_force(dagPath, v_id, diag_v, course_rest))
+            add_to_map(v_id, vertex_force, stretch_force(dagPath, v_id, diag_v, diag_rest_length))
             
             # calculate shear force
             prev_v = vertex_ids[(i - 1) % v_count]
@@ -586,7 +601,7 @@ def stitchMeshRelaxation(mesh, edge_data):
         wale2_v = None
         num_wales_found = 0
         for connecting_edge in connected_edges:
-            if edge_data[connecting_edge] == EdgeType.WALE:
+            if edge_data.get(connecting_edge, EdgeType.UNASSIGNED) == EdgeType.WALE:
                 wale_edge_iter = om.MItMeshEdge(dagPath)
                 wale_edge_iter.setIndex(connecting_edge)
                 v0 = wale_edge_iter.vertexId(0)
@@ -607,7 +622,12 @@ def stitchMeshRelaxation(mesh, edge_data):
             add_to_map(wale2_v, vertex_force, -1* wale_strut_force_val)
 
         vert_iter.next()
-    apply_vertex_offsets(dagPath, vertex_force)
+    apply_vertex_offsets(
+        dagPath,
+        vertex_force,
+        step_scale=MESH_RELAXATION_STEP,
+        max_offset=course_rest * MESH_RELAXATION_MAX_OFFSET_FRACTION,
+    )
 
 
 def apply_stitch_relaxation_forces():
