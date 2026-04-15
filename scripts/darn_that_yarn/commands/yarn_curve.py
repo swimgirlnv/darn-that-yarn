@@ -94,18 +94,24 @@ def update_yarn_tube_radius(radius: float, tube_segments: int = 8) -> List[str]:
             if curve_node.startswith("yarn_row_"):
                 tube_name = curve_node.replace("yarn_row_", "yarn_tube_row_", 1)
             elif curve_node.startswith("yarn_fabric"):
-                tube_name = "yarn_tube_fabric"
+                tube_name = curve_node.replace("yarn_fabric", "yarn_tube_fabric", 1)
             elif curve_node.startswith("yarn_spiral"):
-                tube_name = "yarn_tube_spiral"
+                tube_name = curve_node.replace("yarn_spiral", "yarn_tube_spiral", 1)
             else:
                 tube_name = "yarn_tube"
 
-            tube_node = add_tube_geometry(
-                curve_node,
-                radius=radius,
-                tube_segments=tube_segments,
-                name=tube_name,
-            )
+            try:
+                tube_node = add_tube_geometry(
+                    curve_node,
+                    radius=radius,
+                    tube_segments=tube_segments,
+                    name=tube_name,
+                )
+            except Exception as exc:
+                cmds.warning(  # type: ignore[attr-defined]
+                    f"update_yarn_tube_radius: failed on {curve_node}: {exc}"
+                )
+                tube_node = ""
             if tube_node:
                 cmds.hide(curve_node)
                 rebuilt.append(tube_node)
@@ -728,17 +734,43 @@ def _sample_curve(
     knots = curve_fn.knots()
     t_min = float(knots[0])
     t_max = float(knots[-1])
+    span = max(t_max - t_min, 1e-8)
+    eps = span * 1e-6
 
     samples: List[Tuple[om.MPoint, om.MVector]] = []
     for i in range(num_samples):
         denom = num_samples if closed else max(num_samples - 1, 1)
-        t = t_min + (t_max - t_min) * i / denom
-        pt = curve_fn.getPointAtParam(t, om.MSpace.kWorld)  # type: ignore[attr-defined]
-        tan = curve_fn.tangent(t, om.MSpace.kWorld)  # type: ignore[attr-defined]
-        tan_len = tan.length()
-        if tan_len > 1e-8:
-            tan /= tan_len
-        samples.append((pt, tan))
+        raw_t = t_min + (t_max - t_min) * i / denom
+        if closed:
+            base_t = t_min + ((raw_t - t_min) % span)
+            low = t_min
+            high = t_max - eps
+        else:
+            base_t = raw_t
+            low = t_min + eps
+            high = t_max - eps
+
+        if high <= low:
+            low = t_min
+            high = t_max
+
+        base_t = min(max(base_t, low), high)
+        tried: List[float] = []
+        for dt in (0.0, -eps, eps, -(10.0 * eps), (10.0 * eps)):
+            t = min(max(base_t + dt, low), high)
+            if any(abs(t - prev) <= 1e-12 for prev in tried):
+                continue
+            tried.append(t)
+            try:
+                pt = curve_fn.getPointAtParam(t, om.MSpace.kWorld)  # type: ignore[attr-defined]
+                tan = curve_fn.tangent(t, om.MSpace.kWorld)  # type: ignore[attr-defined]
+                tan_len = tan.length()
+                if tan_len > 1e-8:
+                    tan /= tan_len
+                samples.append((pt, tan))
+                break
+            except RuntimeError:
+                continue
 
     return samples
 
@@ -1288,12 +1320,27 @@ def _generate_rows(
         curve_name: Optional[str] = None,
         tube_name: Optional[str] = None,
     ) -> None:
+        def _compact_points(points: List[om.MPoint], eps: float = 1e-8) -> List[om.MPoint]:
+            if not points:
+                return []
+            compacted: List[om.MPoint] = [points[0]]
+            for pt in points[1:]:
+                prev = compacted[-1]
+                dx = pt.x - prev.x
+                dy = pt.y - prev.y
+                dz = pt.z - prev.z
+                if (dx * dx + dy * dy + dz * dz) <= (eps * eps):
+                    continue
+                compacted.append(pt)
+            return compacted
+
         if curve_name is None:
             curve_name = f"yarn_row_{row_idx:04d}" if closed else "yarn_fabric"
         if tube_name is None:
             tube_name = f"yarn_tube_row_{row_idx:04d}" if closed else "yarn_tube_fabric"
 
-        curve_node = curve.build_maya_curve(curve_name, closed=closed)
+        build_curve = YarnCurve(points=_compact_points(curve.points))
+        curve_node = build_curve.build_maya_curve(curve_name, closed=closed)
         if not curve_node:
             return
 
@@ -1309,10 +1356,14 @@ def _generate_rows(
                     cmds.hide(curve_node)
                     created_nodes.append(tube_node)
                 else:
-                    cmds.warning(f"yarn tube failed for row {row_idx}; curve kept.")  # type: ignore[attr-defined]
+                    cmds.warning(  # type: ignore[attr-defined]
+                        f"yarn tube failed for row {row_idx} ({curve_name}); curve kept."
+                    )
                     created_nodes.append(curve_node)
             except Exception as exc:
-                cmds.warning(f"yarn tube exception row {row_idx}: {exc}")  # type: ignore[attr-defined]
+                cmds.warning(  # type: ignore[attr-defined]
+                    f"yarn tube exception row {row_idx} ({curve_name}): {exc}"
+                )
                 created_nodes.append(curve_node)
         else:
             created_nodes.append(curve_node)
@@ -1462,8 +1513,7 @@ def _generate_rows(
         )
         open_segment_index += 1
 
-        tail = open_curve.points[-1]
-        open_curve.points = [tail]
+        open_curve.points = open_curve.points[-2:] if len(open_curve.points) >= 2 else open_curve.points[-1:]
 
     def _flush_spiral_curve(force: bool = False) -> None:
         nonlocal spiral_segment_index
@@ -1481,8 +1531,7 @@ def _generate_rows(
         )
         spiral_segment_index += 1
 
-        tail = spiral_curve.points[-1]
-        spiral_curve.points = [tail]
+        spiral_curve.points = spiral_curve.points[-2:] if len(spiral_curve.points) >= 2 else spiral_curve.points[-1:]
 
     def _on_face_processed_open(curve: YarnCurve) -> None:
         nonlocal processed_faces
