@@ -100,8 +100,16 @@ def show_darn_that_yarn_ui():
 
 
 def _activate_mesh(mesh):
+    previous_mesh = STATE.selected_mesh
+    if previous_mesh and previous_mesh != mesh and cmds.objExists(previous_mesh):
+        cmds.showHidden(previous_mesh)
+
     STATE.selected_mesh = mesh
     STATE.base_mesh = mesh
+    if cmds.objExists(mesh):
+        cmds.showHidden(mesh)
+        cmds.select(mesh, replace=True)
+
     _set_status(f"Active mesh: {mesh}")
     init_stitch_mesh_data_structures()
     init_stitch_face_data_structure()

@@ -659,8 +659,8 @@ def apply_stitch_relaxation_forces():
 def tessellate_stitch_mesh(level):
     """
     Subdivides all stitch faces on the selected mesh by the given tessellation level.
-    The original mesh is hidden but preserved so it can be restored. A duplicate
-    (the tessellated preview) is shown in the viewport. Re-calling with a new level
+    The original mesh is preserved and remains visible. A duplicate (the
+    tessellated preview) is shown in the viewport. Re-calling with a new level
     replaces the previous preview without touching the original.
     """
     if not STATE.selected_mesh:
@@ -712,9 +712,6 @@ def tessellate_stitch_mesh(level):
 
     draw_t_course_edges_as_curves()
 
-
-    # Hide the original; the tessellated preview becomes the viewport representation.
-    cmds.hide(STATE.selected_mesh)
 
     cmds.inViewMessage(
         amg=f"Tessellated stitch mesh at level <hl>{level}</hl> ({level + 1}×{level + 1} stitches per face).",
@@ -838,8 +835,6 @@ def apply_stitch_mesh_relaxation_before_generation(progress_callback=None):
         cmds.refresh()
 
     STATE.preview_mesh_relaxed = True
-    if STATE.selected_mesh and cmds.objExists(STATE.selected_mesh):
-        cmds.hide(STATE.selected_mesh)
 
 
 def set_yarn_thickness(radius):
