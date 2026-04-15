@@ -429,42 +429,29 @@ def append_knit_points(
     lower_height: float = 0.0,
 ) -> None:
     """
-    Knit stitch – lower loop is pulled from back to front.
+    Knit stitch – yarn forms a backward-facing loop.
 
-    The two bottom course-edge crossings tuck behind the older loop, then the
-    strand comes forward into the visible V.  The two top course-edge crossings
-    tuck behind the fabric to leave a receiving loop for the next row.
+    This restores the earlier curve template from the better-looking yarn
+    generation commit.  The bottom points dip past the face boundary so the
+    visible strand threads through the loop from the row below, then the upper
+    arch forms the receiving loop for the next row.
     """
-    if lower_face is not None and lower_width > 0.0 and lower_height > 0.0:
-        # Use the face below for the bottom course crossings.  Those points
-        # sit in the top of the older loop, so the current yarn is visibly
-        # pulled through the previous row instead of floating inside only its
-        # own face.
-        pts = [
-            _face_pt(face, WALE_LEFT, -0.02, -0.26, width, height),
-            _face_pt(face, -0.34, COURSE_TOP, -0.38, width, height),
-            _face_pt(face, -0.28, 0.25, 0.34, width, height),
-            _face_pt(lower_face, -0.18, COURSE_TOP, -0.44, lower_width, lower_height),
-            _face_pt(face, 0.00, -0.26, 0.86, width, height),
-            _face_pt(lower_face, 0.18, COURSE_TOP, -0.44, lower_width, lower_height),
-            _face_pt(face, 0.28, 0.25, 0.34, width, height),
-            _face_pt(face, 0.34, COURSE_TOP, -0.38, width, height),
-            _face_pt(face, WALE_RIGHT, -0.02, -0.26, width, height),
-        ]
-        curve.extend(pts)
-    else:
-        LOCAL: List[Tuple[float, float, float]] = [
-            (WALE_LEFT,    -0.02, -0.26),  # single left-wale crossover
-            (-0.34, COURSE_TOP, -0.38),    # first top course crossover
-            (-0.28,  0.25,  0.34),         # left shoulder visible on the front
-            (-0.18, COURSE_BOTTOM, -0.38), # first bottom course crossover
-            ( 0.00, -0.26,  0.82),         # back-to-front pull-through
-            ( 0.18, COURSE_BOTTOM, -0.38), # second bottom course crossover
-            ( 0.28,  0.25,  0.34),         # right shoulder visible on the front
-            ( 0.34, COURSE_TOP, -0.38),    # second top course crossover
-            (WALE_RIGHT,   -0.02, -0.26),  # single right-wale crossover
-        ]
-        _append_local_points(curve, width, height, face, LOCAL)
+    LOCAL: List[Tuple[float, float, float]] = [
+        (-0.48, -0.54,  0.18),  # incoming at left wale edge
+        (-0.36, -0.50, -0.70),  # behind previous loop's left leg
+        ( 0.00, -0.34,  0.62),  # front center: pulled through the loop
+        ( 0.36, -0.50, -0.70),  # behind previous loop's right leg
+        ( 0.48, -0.54,  0.18),  # exits old loop at right wale edge
+        ( 0.36, -0.10,  0.08),  # lower right leg turns upward
+        ( 0.35,  0.46, -0.42),  # right arch arm behind next row
+        ( 0.00,  0.66, -0.42),  # top of the new loop
+        (-0.35,  0.46, -0.42),  # left arch arm behind next row
+        (-0.36, -0.10,  0.08),  # lower left leg returns toward course path
+        (-0.10, -0.34,  0.62),  # front center still held through old loop
+        ( 0.36, -0.50, -0.70),  # dives behind old loop's right leg again
+        ( 0.48, -0.54,  0.18),  # outgoing to next stitch connection
+    ]
+    _append_local_points(curve, width, height, face, LOCAL)
 
 
 def append_purl_points(
@@ -477,38 +464,27 @@ def append_purl_points(
     lower_height: float = 0.0,
 ) -> None:
     """
-    Purl stitch – lower loop is pulled from front to back.
+    Purl stitch – mirror of knit with the loop facing forward.
 
-    Compared with knit, the pull-through pinches toward the back while the
-    front strand forms the pearl bump.  The edge crossing counts match the same
-    stitch-mesh topology as knit, only with reversed depth ordering.
+    This restores the earlier visual template that produced a clearer purl
+    surface while preserving the opposite over/under ordering from knit.
     """
-    if lower_face is not None and lower_width > 0.0 and lower_height > 0.0:
-        pts = [
-            _face_pt(face, WALE_LEFT, -0.02, 0.24, width, height),
-            _face_pt(face, -0.34, COURSE_TOP, 0.32, width, height),
-            _face_pt(face, -0.26, 0.12, 0.72, width, height),
-            _face_pt(lower_face, -0.18, COURSE_TOP, 0.42, lower_width, lower_height),
-            _face_pt(face, 0.00, -0.20, -0.78, width, height),
-            _face_pt(lower_face, 0.18, COURSE_TOP, 0.42, lower_width, lower_height),
-            _face_pt(face, 0.26, 0.12, 0.72, width, height),
-            _face_pt(face, 0.34, COURSE_TOP, 0.32, width, height),
-            _face_pt(face, WALE_RIGHT, -0.02, 0.24, width, height),
-        ]
-        curve.extend(pts)
-    else:
-        LOCAL: List[Tuple[float, float, float]] = [
-            (WALE_LEFT,    -0.02,  0.24),  # single left-wale crossover
-            (-0.34, COURSE_TOP,  0.32),    # first top course crossover
-            (-0.26,  0.12,  0.72),         # pearl bump rises forward
-            (-0.18, COURSE_BOTTOM,  0.32), # first bottom course crossover
-            ( 0.00, -0.20, -0.74),         # front-to-back pull-through
-            ( 0.18, COURSE_BOTTOM,  0.32), # second bottom course crossover
-            ( 0.26,  0.12,  0.72),         # pearl bump returns
-            ( 0.34, COURSE_TOP,  0.32),    # second top course crossover
-            (WALE_RIGHT,   -0.02,  0.24),  # single right-wale crossover
-        ]
-        _append_local_points(curve, width, height, face, LOCAL)
+    LOCAL: List[Tuple[float, float, float]] = [
+        (-0.48, -0.54, -0.18),  # incoming at left wale edge
+        (-0.36, -0.50,  0.70),  # in front of previous loop's left leg
+        ( 0.00, -0.34, -0.62),  # back center: pulled through the loop
+        ( 0.36, -0.50,  0.70),  # in front of previous loop's right leg
+        ( 0.48, -0.54, -0.18),  # exits old loop at right wale edge
+        ( 0.36, -0.10, -0.08),  # lower right leg turns upward
+        ( 0.35,  0.46,  0.42),  # right arch arm in front
+        ( 0.00,  0.66,  0.42),  # top of the purl loop
+        (-0.35,  0.46,  0.42),  # left arch arm in front
+        (-0.36, -0.10, -0.08),  # lower left leg returns toward course path
+        (-0.10, -0.34, -0.62),  # back center still held through old loop
+        ( 0.36, -0.50,  0.70),  # moves in front of old loop's right leg again
+        ( 0.48, -0.54, -0.18),  # outgoing to next stitch connection
+    ]
+    _append_local_points(curve, width, height, face, LOCAL)
 
 
 def append_yarnover_points(
@@ -1734,6 +1710,10 @@ def _generate_rows(
 
             if lower_candidates:
                 _lower_projection, lower_fid = min(lower_candidates, key=lambda item: item[0])
+            else:
+                lower_fid = None
+
+            if lower_fid is not None:
                 lower_ctx = build_face_context(dag_path, lower_fid)
                 lower_width, lower_height = face_dimensions.get(
                     lower_fid, _compute_face_dimensions(dag_path, lower_fid)

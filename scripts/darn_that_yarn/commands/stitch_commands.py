@@ -362,7 +362,9 @@ def shrinkwrap_preview_to_smoothed():
     #     cmds.error("Please select exactly two meshes: [target, wrapper]")
     
     target = STATE.smoothed_mesh
-    wrapper = STATE.preview_mesh
+    wrapper = STATE.base_mesh
+    if STATE.is_tessellated:
+        wrapper = STATE.preview_mesh
     if not target or not wrapper:
         cmds.warning("Cannot shrinkwrap: missing smoothed target or preview mesh.")
         return
@@ -385,17 +387,18 @@ def shrinkwrap_preview_to_smoothed():
 
     cmds.delete(STATE.smoothed_mesh)
     STATE.smoothed_mesh = None
+    cmds.select(wrapper)
 
 def create_smoothed_stitch_mesh(level):
     """
     creates catmull clark smoothed mesh so tessellated mesh can be projected onto it
     """
-    if not STATE.selected_mesh:
+    if not STATE.base_mesh:
         cmds.warning("No mesh selected. Select a polygon mesh first.")
         return
 
-    if not cmds.objExists(STATE.selected_mesh):
-        cmds.warning(f"Mesh '{STATE.selected_mesh}' no longer exists.")
+    if not cmds.objExists(STATE.base_mesh):
+        cmds.warning(f"Mesh '{STATE.base_mesh}' no longer exists.")
         return
 
     # Clean up any existing smoothed mesh before creating a new one.
@@ -405,10 +408,10 @@ def create_smoothed_stitch_mesh(level):
 
     # Ensure the original is visible before duplicating so the duplicate inherits
     # the correct visibility state.
-    cmds.showHidden(STATE.selected_mesh)
+    cmds.showHidden(STATE.base_mesh)
 
-    duplicates = cmds.duplicate(STATE.selected_mesh, returnRootsOnly=True)
-    smoothedM = cmds.rename(duplicates[0], _derived_node_name(STATE.selected_mesh, "_smooth_target"))
+    duplicates = cmds.duplicate(STATE.base_mesh, returnRootsOnly=True)
+    smoothedM = cmds.rename(duplicates[0], _derived_node_name(STATE.base_mesh, "_smooth_target"))
     STATE.smoothed_mesh = smoothedM
 
     # Subdivide all faces of the preview mesh.
@@ -604,46 +607,6 @@ def stitchMeshRelaxation(mesh, edge_data):
             add_to_map(wale2_v, vertex_force, -1* wale_strut_force_val)
 
         vert_iter.next()
-
-
-    # wale_edges = [e for e, t in edge_data.items() if t == EdgeType.WALE]
-
-    # edge_iter = om.MItMeshEdge(dagPath)
-    # poly_iter = om.MItMeshPolygon(dagPath)
-    # for edge_id in wale_edges:
-    #     # Set edge iterator to this edge
-    #     edge_iter.setIndex(edge_id)
-        
-    #     # Get faces connected to this edge
-    #     face_ids = edge_iter.getConnectedFaces()
-        
-    #     print("Edge {} is connected to faces: {}".format(edge_id, face_ids))
-        
-    #     # For each face, get its edges
-    #     for face_id in face_ids:
-    #         poly_iter.setIndex(face_id)
-            
-    #         face_edge_ids = poly_iter.getEdges()
-    #         for face_edge_id in poly_iter.getEdges(): 
-    #             if face_edge_id != edge_id and edge_data[face_edge_id] == EdgeType.WALE:
-    #                 vertex_ids = poly_iter.getVertices()
-    #                 edge_iter_original_wale = om.MItMeshEdge(dagPath)
-    #                 edge_iter_original_wale.setIndex(edge_id)
-    #                 ow_v0 = edge_iter_original_wale.vertexId(0)
-    #                 ow_v1 = edge_iter_original_wale.vertexId(1)
-    #                 for i, v_id in enumerate(vertex_ids):
-    #                     if v_id in (ow_v0, ow_v1) and vertex_ids[(i + 1) % v_count] in (ow_v0, ow_v1):
-    #                         v_i = 
-    #                         break
-                        
-    #                 print("Opposing WALE found!! >; )")
-    #                 print(face_edge_id)
-    #                 break
-            
-    #         print("  Face {} has edges: {}".format(face_id, face_edge_ids))
-    
-
-
     apply_vertex_offsets(dagPath, vertex_force)
 
 
