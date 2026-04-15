@@ -28,6 +28,7 @@ from typing import Callable, List, Optional, Tuple
 
 import maya.api.OpenMaya as om
 import maya.cmds as cmds
+import maya.utils as maya_utils
 
 from darn_that_yarn.commands.stitch_commands import EdgeType, StitchType
 from darn_that_yarn.core.state import STATE
@@ -54,6 +55,9 @@ YARN_CURVE_PREFIXES = (
 
 DEFAULT_YARN_RADIUS = 0.08
 YARN_RADIUS_STITCH_FRACTION = 0.14
+DEFAULT_ROW_CHUNK_SIZE = 24
+DEFAULT_MAX_POINTS_PER_CURVE = 30000
+DEFAULT_UI_YIELD_FACE_INTERVAL = 300
 
 
 def _delete_existing_yarn_nodes() -> None:
@@ -942,6 +946,9 @@ def generate_yarn_curves(
     add_tubes: bool = False,
     yarn_radius: float = 0.0,
     tube_segments: int = 6,
+    row_chunk_size: int = DEFAULT_ROW_CHUNK_SIZE,
+    max_points_per_curve: int = DEFAULT_MAX_POINTS_PER_CURVE,
+    ui_yield_face_interval: int = DEFAULT_UI_YIELD_FACE_INTERVAL,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> List[str]:
     """
@@ -962,8 +969,6 @@ def generate_yarn_curves(
 
     Returns a list of curve (or tube) node names.
     """
-    from collections import deque
-
     # ── Select the right data source depending on tessellation state ──────────
     # After tessellation + shrinkwrap, the live geometry is STATE.preview_mesh
     # with edge/face data in STATE.t_edge_map / STATE.t_face_stitch_map.
@@ -987,7 +992,15 @@ def generate_yarn_curves(
     try:
         if progress_callback:
             progress_callback(2, "Generating yarn curves")
-        nodes = _generate_yarn_curves_impl(add_tubes, yarn_radius, tube_segments)
+        nodes = _generate_yarn_curves_impl(
+            add_tubes=add_tubes,
+            yarn_radius=yarn_radius,
+            tube_segments=tube_segments,
+            row_chunk_size=row_chunk_size,
+            max_points_per_curve=max_points_per_curve,
+            ui_yield_face_interval=ui_yield_face_interval,
+            progress_callback=progress_callback,
+        )
         if progress_callback:
             progress_callback(98, "Yarn geometry complete")
         return nodes
@@ -1001,6 +1014,10 @@ def _generate_yarn_curves_impl(
     add_tubes: bool,
     yarn_radius: float,
     tube_segments: int,
+    row_chunk_size: int,
+    max_points_per_curve: int,
+    ui_yield_face_interval: int,
+    progress_callback: Optional[Callable[[int, str], None]],
 ) -> List[str]:
     """Internal implementation – always reads from STATE.face_stitch_map / STATE.base_mesh."""
     from collections import deque
@@ -1086,6 +1103,10 @@ def _generate_yarn_curves_impl(
         _generate_rows(
             rows, min_row, max_row, dag_path, face_adj, add_tubes,
             yarn_radius, tube_segments, created_nodes,
+            row_chunk_size=row_chunk_size,
+            max_points_per_curve=max_points_per_curve,
+            ui_yield_face_interval=ui_yield_face_interval,
+            progress_callback=progress_callback,
         )
     finally:
         cmds.refresh(suspend=False)  # type: ignore[attr-defined]
@@ -1107,7 +1128,41 @@ def _generate_rows(
     yarn_radius: float,
     tube_segments: int,
     created_nodes: list,
+    row_chunk_size: int,
+    max_points_per_curve: int,
+    ui_yield_face_interval: int,
+    progress_callback: Optional[Callable[[int, str], None]],
 ) -> None:
+    row_chunk_size = max(1, int(row_chunk_size))
+    max_points_per_curve = max(8, int(max_points_per_curve))
+    ui_yield_face_interval = max(1, int(ui_yield_face_interval))
+
+    total_faces = sum(len(face_list) for face_list in rows.values())
+    processed_faces = 0
+    processed_rows = 0
+    last_reported_progress = 2
+
+    def _emit_progress(status: str) -> None:
+        nonlocal last_reported_progress
+        if not progress_callback or total_faces <= 0:
+            return
+        pct = 2 + int((processed_faces * 95) / total_faces)
+        pct = max(2, min(97, pct))
+        progress_callback(pct, status)
+        last_reported_progress = max(last_reported_progress, pct)
+
+    def _yield_ui() -> None:
+        # Pump idle events periodically so Maya can remain responsive while
+        # generation runs with viewport refresh suspended.
+        try:
+            maya_utils.processIdleEvents()
+            return
+        except Exception:
+            pass
+        cmds.refresh(suspend=False)  # type: ignore[attr-defined]
+        cmds.refresh()  # type: ignore[attr-defined]
+        cmds.refresh(suspend=True)  # type: ignore[attr-defined]
+
     # ── Precompute face and row centroids for wale_axis orientation ────────
     # wale_axis direction from edge vectors is arbitrary (depends on edge
     # traversal order).  We correct it here so it always points toward the
@@ -1267,6 +1322,7 @@ def _generate_rows(
         face_list: list,
         curve: YarnCurve,
         closed_row: bool = False,
+        per_face_callback: Optional[Callable[[YarnCurve], None]] = None,
     ) -> None:
         is_first_row = (row_idx == min_row)
         is_last_row  = (row_idx == max_row)
@@ -1371,14 +1427,78 @@ def _generate_rows(
             if is_last_row and face_idx == len(face_list) - 1:
                 append_bind_off_points(curve, width, height, ctx)
 
+            if per_face_callback:
+                per_face_callback(curve)
+
     # Open cloth uses one continuous strand that snakes across rows.  Tube
     # rows use one open spiral strand: each completed circumference advances
     # to the next row at the seam instead of closing each row as a ring.  This
     # avoids periodic curve chords through the cylinder interior.
     open_curve = YarnCurve()
     open_row_count = 0
+    open_segment_index = 1
     spiral_curve = YarnCurve()
+    spiral_segment_index = 1
     spiral_start_ref: Optional[Tuple[float, float, float]] = None
+
+    def _next_segment_name(base: str, index: int) -> str:
+        if index == 1:
+            return base
+        return f"{base}_part_{index:04d}"
+
+    def _flush_open_curve(force: bool = False) -> None:
+        nonlocal open_segment_index
+        if len(open_curve.points) < 2:
+            return
+        if not force and len(open_curve.points) < max_points_per_curve:
+            return
+
+        _materialize_curve(
+            open_curve,
+            min_row,
+            closed=False,
+            curve_name=_next_segment_name("yarn_fabric", open_segment_index),
+            tube_name=_next_segment_name("yarn_tube_fabric", open_segment_index),
+        )
+        open_segment_index += 1
+
+        tail = open_curve.points[-1]
+        open_curve.points = [tail]
+
+    def _flush_spiral_curve(force: bool = False) -> None:
+        nonlocal spiral_segment_index
+        if len(spiral_curve.points) < 2:
+            return
+        if not force and len(spiral_curve.points) < max_points_per_curve:
+            return
+
+        _materialize_curve(
+            spiral_curve,
+            min_row,
+            closed=False,
+            curve_name=_next_segment_name("yarn_spiral", spiral_segment_index),
+            tube_name=_next_segment_name("yarn_tube_spiral", spiral_segment_index),
+        )
+        spiral_segment_index += 1
+
+        tail = spiral_curve.points[-1]
+        spiral_curve.points = [tail]
+
+    def _on_face_processed_open(curve: YarnCurve) -> None:
+        nonlocal processed_faces
+        processed_faces += 1
+        _flush_open_curve(force=False)
+        if processed_faces % ui_yield_face_interval == 0:
+            _emit_progress(f"Generating yarn ({processed_faces}/{total_faces} faces)")
+            _yield_ui()
+
+    def _on_face_processed_spiral(curve: YarnCurve) -> None:
+        nonlocal processed_faces
+        processed_faces += 1
+        _flush_spiral_curve(force=False)
+        if processed_faces % ui_yield_face_interval == 0:
+            _emit_progress(f"Generating yarn ({processed_faces}/{total_faces} faces)")
+            _yield_ui()
 
     for row_idx in sorted(rows):
         face_list = rows[row_idx]
@@ -1388,23 +1508,29 @@ def _generate_rows(
             path_faces = _order_closed_row(face_list, spiral_start_ref)
             if path_faces:
                 spiral_start_ref = face_centroids.get(path_faces[0][1], spiral_start_ref)
-            _append_row_points(row_idx, path_faces, spiral_curve, closed_row=True)
-            continue
+            _append_row_points(
+                row_idx,
+                path_faces,
+                spiral_curve,
+                closed_row=True,
+                per_face_callback=_on_face_processed_spiral,
+            )
+        else:
+            path_faces = list(face_list)
+            if open_row_count % 2 == 1:
+                path_faces.reverse()
+            _append_row_points(
+                row_idx,
+                path_faces,
+                open_curve,
+                per_face_callback=_on_face_processed_open,
+            )
+            open_row_count += 1
 
-        path_faces = list(face_list)
-        if open_row_count % 2 == 1:
-            path_faces.reverse()
-        _append_row_points(row_idx, path_faces, open_curve)
-        open_row_count += 1
+        processed_rows += 1
+        if processed_rows % row_chunk_size == 0:
+            _emit_progress(f"Generating yarn ({processed_faces}/{total_faces} faces)")
+            _yield_ui()
 
-    if open_curve.points:
-        _materialize_curve(open_curve, min_row, closed=False)
-
-    if spiral_curve.points:
-        _materialize_curve(
-            spiral_curve,
-            min_row,
-            closed=False,
-            curve_name="yarn_spiral",
-            tube_name="yarn_tube_spiral",
-        )
+    _flush_open_curve(force=True)
+    _flush_spiral_curve(force=True)
