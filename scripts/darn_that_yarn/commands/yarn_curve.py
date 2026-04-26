@@ -31,6 +31,7 @@ import maya.cmds as cmds
 import maya.utils as maya_utils
 
 from darn_that_yarn.commands.stitch_commands import EdgeType, StitchType
+from darn_that_yarn.commands.yarn_material import assign_material_to_yarn_by_name, clean_yarn_UVs
 from darn_that_yarn.core.state import STATE
 
 
@@ -107,6 +108,10 @@ def update_yarn_tube_radius(radius: float, tube_segments: int = 8) -> List[str]:
                     tube_segments=tube_segments,
                     name=tube_name,
                 )
+                STATE.yarn_mesh = tube_node
+                if STATE.yarn_material:
+                    assign_material_to_yarn_by_name(STATE.yarn_material)
+                    clean_yarn_UVs()
             except Exception as exc:
                 cmds.warning(  # type: ignore[attr-defined]
                     f"update_yarn_tube_radius: failed on {curve_node}: {exc}"
@@ -1353,6 +1358,7 @@ def _generate_rows(
                     name=tube_name,
                 )
                 if tube_node:
+                    STATE.yarn_mesh = tube_node
                     cmds.hide(curve_node)
                     created_nodes.append(tube_node)
                 else:

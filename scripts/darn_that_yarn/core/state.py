@@ -26,6 +26,9 @@ class StitchToolState:
     t_edge_map: Dict[int, Any] = field(default_factory=dict)
     t_mesh: Optional[str] = None
     smoothed_mesh: Optional[str] = None
+    yarn_texture_path: str =  r"darn-that-yarn\jersey_melange_diff_1k.jpg"
+    yarn_material: Optional[str] = None
+    yarn_mesh: Optional[str] = None
 
     def reset(self):
         self.selected_mesh = None
@@ -50,6 +53,7 @@ class StitchToolState:
         self.t_edge_map.clear()
         self.t_mesh = None
         self.smoothed_mesh = None
+        self.yarn_texture_path = None
 
 
 STATE = StitchToolState()
