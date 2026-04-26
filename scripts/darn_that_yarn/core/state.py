@@ -1,6 +1,10 @@
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Set
 
+curr_dir = os.path.dirname(os.path.abspath(__file__))
+texture_path = os.path.join(curr_dir, "jersey_melange_diff_1k.jpg")
+texture_path = texture_path.replace("\\", "/")
 
 @dataclass
 class StitchToolState:
@@ -26,7 +30,7 @@ class StitchToolState:
     t_edge_map: Dict[int, Any] = field(default_factory=dict)
     t_mesh: Optional[str] = None
     smoothed_mesh: Optional[str] = None
-    yarn_texture_path: str =  r"darn-that-yarn\jersey_melange_diff_1k.jpg"
+    yarn_texture_path: str =  texture_path
     yarn_material: Optional[str] = None
     yarn_mesh: Optional[str] = None
 
