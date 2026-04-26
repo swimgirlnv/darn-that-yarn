@@ -257,7 +257,7 @@ def _build_ui(parent):
     )
     UI["checker_pattern_btn"] = cmds.iconTextButton(
         style="iconOnly",  # or "iconAndTextVertical" if you want both
-        image1=r"darn-that-yarn\checkeredYarn.png",
+        image1=r"checkeredYarn.png",
         command=lambda *_: _handle_pattern_fill("checker"),
         enable=False,
         height=72,
@@ -267,7 +267,7 @@ def _build_ui(parent):
     )
     UI["rib_pattern_btn"] = cmds.iconTextButton(
         style="iconOnly",  # or "iconAndTextVertical" if you want both
-        image1=r"darn-that-yarn\ribbedKnit.png", 
+        image1=r"ribbedKnit.png", 
         command=lambda *_: _handle_pattern_fill("rib"),
         enable=False,
         height=72,
