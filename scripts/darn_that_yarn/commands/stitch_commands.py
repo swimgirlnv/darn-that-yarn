@@ -818,9 +818,9 @@ def apply_stitch_mesh_relaxation_before_generation(progress_callback=None):
         duplicates = cmds.duplicate(STATE.base_mesh, returnRootsOnly=True)
         preview = cmds.rename(duplicates[0], _derived_node_name(STATE.base_mesh, "_base_relaxed_preview"))
         STATE.t_mesh = preview
-        STATE.t_edge_map = STATE.edge_map
+        STATE.t_edge_map = STATE.edge_map.copy()
         STATE.preview_mesh = preview
-        STATE.t_face_stitch_map = STATE.face_stitch_map
+        STATE.t_face_stitch_map = STATE.face_stitch_map.copy()
         # meshToRelax = STATE.base_mesh
         # meshToRelaxEdgeMap = STATE.edge_map
     meshToRelax = STATE.t_mesh
