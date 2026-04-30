@@ -3,7 +3,7 @@ import maya.mel as mel
 
 from darn_that_yarn.core.selection import get_selection_summary, get_selected_mesh_transform
 from darn_that_yarn.core.state import STATE
-from darn_that_yarn.commands.yarn_material import create_yarn_material_with_texture, clean_yarn_UVs, set_texture_image
+from darn_that_yarn.commands.yarn_material import create_yarn_material_with_texture, clean_yarn_UVs, set_texture_image, assign_material_to_yarn_by_name
 from darn_that_yarn.commands.stitch_commands import (
     set_course_edges,
     set_stitch_type,
@@ -392,11 +392,12 @@ def _build_ui(parent):
 
     cmds.setParent("..")
 
-    # UI["gen_yarn_texture_btn"] = cmds.button(
-    #     label="Generate New Yarn Material",
-    #     height=30,
-    #     command=lambda *_: _handle_material_generate()
-    # )
+    UI["apply_yarn_texture_btn"] = cmds.button(
+        label="Apply Yarn Material",
+        height=30,
+        enable=False,
+        command=lambda *_: _handle_material_apply()
+    )
 
 
     cmds.setParent("..")
@@ -464,7 +465,7 @@ def refresh_ui_state(*_):
         cmds.iconTextButton(UI["checker_pattern_btn"], edit=True, enable=False)
         cmds.iconTextButton(UI["rib_pattern_btn"], edit=True, enable=False)
         for key in ("set_course_btn", "set_stitch_btn", "flip_row_btn",
-                    "tessellate_btn", "restore_btn", "generate_btn"):
+                    "tessellate_btn", "restore_btn", "generate_btn", "apply_yarn_texture_btn"):
             cmds.button(UI[key], edit=True, enable=False)
         _set_pattern_preview(STATE.selected_pattern)
         return
@@ -486,6 +487,7 @@ def refresh_ui_state(*_):
         or len(STATE.active_faces) > 0
         or any(v.name == "COURSE" for v in STATE.edge_map.values())
     )
+    yarn_mesh_generated = STATE.yarn_mesh != None
 
     # only display possible stitch types by edge number in dropdown
     sel_faces_num_edges = get_selected_faces_edge_num()
@@ -508,6 +510,7 @@ def refresh_ui_state(*_):
     cmds.iconTextButton(UI["rib_pattern_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["tessellate_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["restore_btn"], edit=True, enable=STATE.is_tessellated)
+    cmds.button(UI["apply_yarn_texture_btn"], edit=True, enable=yarn_mesh_generated)
     cmds.button(UI["generate_btn"], edit=True, enable=has_any_stitch_data)
     _set_pattern_preview(STATE.selected_pattern)
 
@@ -571,7 +574,6 @@ def _handle_yarn_radius_changed(value):
 
 def _handle_generate():
     generate_knit_mesh()
-    _handle_material_generate()
 
 
 def _handle_pattern_fill(pattern=None):
@@ -609,6 +611,9 @@ def _handle_browse_texture_file():
     if STATE.yarn_material:
         set_texture_image(STATE.yarn_material, STATE.yarn_texture_path)
 
-def _handle_material_generate():
-    create_yarn_material_with_texture(STATE.yarn_texture_path)
-    clean_yarn_UVs()
+def _handle_material_apply():
+    if not STATE.yarn_material:
+        create_yarn_material_with_texture(STATE.yarn_texture_path)
+    if not STATE.yarn_uvs_clean:
+        clean_yarn_UVs()
+    assign_material_to_yarn_by_name(STATE.yarn_material)

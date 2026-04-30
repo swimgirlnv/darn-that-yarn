@@ -109,9 +109,7 @@ def update_yarn_tube_radius(radius: float, tube_segments: int = 8) -> List[str]:
                     name=tube_name,
                 )
                 STATE.yarn_mesh = tube_node
-                if STATE.yarn_material:
-                    assign_material_to_yarn_by_name(STATE.yarn_material)
-                    clean_yarn_UVs()
+                STATE.yarn_uvs_clean = False
             except Exception as exc:
                 cmds.warning(  # type: ignore[attr-defined]
                     f"update_yarn_tube_radius: failed on {curve_node}: {exc}"
@@ -1359,6 +1357,7 @@ def _generate_rows(
                 )
                 if tube_node:
                     STATE.yarn_mesh = tube_node
+                    STATE.yarn_uvs_clean = False
                     cmds.hide(curve_node)
                     created_nodes.append(tube_node)
                 else:

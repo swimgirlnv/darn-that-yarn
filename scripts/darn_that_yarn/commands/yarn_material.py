@@ -67,8 +67,8 @@ def create_yarn_material_with_texture(image_path):
     # Connect shader to shading group
     cmds.connectAttr(shader + ".outColor", sg + ".surfaceShader", force=True)
 
-    # Assign to selection
-    cmds.sets(selection, edit=True, forceElement=sg)
+    # # Assign to selection
+    # cmds.sets(selection, edit=True, forceElement=sg)
 
     STATE.yarn_material = shader_name
 
@@ -107,7 +107,6 @@ def assign_material_to_yarn_by_name(material_name):
     cmds.sets(selection, edit=True, forceElement=shading_group)
 
     print(f"Assigned material '{material_name}' to {len(selection)} object(s).")
-
 
 def set_texture_image(node_name, image_path):
     """
@@ -218,6 +217,8 @@ def clean_yarn_UVs():
     cmds.select(faces)
     face_count= get_face_count(STATE.yarn_mesh)
     mel.eval(f"u3dUnfold -ite 1 -p 0 -bi 1 -tf 1 -ms 1024 -rs 0 {STATE.yarn_mesh}.f[0:{face_count}];")
-
-# Example usage:
-#create_yarn_material_with_texture(r"C:\Users\rosek\Downloads\curly_teddy_natural_4k.blend (2)\textures\curly_teddy_natural_diff_4k.jpg")
+    # cmds.u3dUnfold(
+    #     f"{STATE.yarn_mesh}.f[*]",
+    #     ite=1, p=0, bi=1, tf=1, ms=1024, rs=0
+    # )
+    STATE.yarn_uvs_clean = True

@@ -33,6 +33,7 @@ class StitchToolState:
     yarn_texture_path: str =  texture_path
     yarn_material: Optional[str] = None
     yarn_mesh: Optional[str] = None
+    yarn_uvs_clean: bool = False
 
     def reset(self):
         self.selected_mesh = None
