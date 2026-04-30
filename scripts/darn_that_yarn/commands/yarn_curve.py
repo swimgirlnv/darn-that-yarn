@@ -1015,8 +1015,7 @@ def generate_yarn_curves(
     _old_base_mesh       = STATE.base_mesh
 
     if (
-        STATE.is_tessellated
-        and STATE.preview_mesh
+        STATE.preview_mesh
         and cmds.objExists(STATE.preview_mesh)  # type: ignore[attr-defined]
         and STATE.t_face_stitch_map
     ):

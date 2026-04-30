@@ -59,6 +59,9 @@ class StitchToolState:
         self.t_mesh = None
         self.smoothed_mesh = None
         self.yarn_texture_path = None
+        self.yarn_material: Optional[str] = None
+        self.yarn_mesh: Optional[str] = None
+        self.yarn_uvs_clean: bool = False
 
 
 STATE = StitchToolState()

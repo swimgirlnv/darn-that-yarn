@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import maya.mel as mel
 import math
 
-MESH_RELAXATION_ITERATIONS = 20
+MESH_RELAXATION_ITERATIONS = 100
 MESH_RELAXATION_STEP = 0.35
 MESH_RELAXATION_MAX_OFFSET_FRACTION = 0.25
 TESSELLATED_EDGE_CURVE_LIMIT = 450
@@ -810,9 +810,21 @@ def apply_stitch_mesh_relaxation_before_generation(progress_callback=None):
         return
     if STATE.preview_mesh_relaxed:
         return
+    # if not STATE.is_tessellated or not STATE.preview_mesh or not cmds.objExists(STATE.preview_mesh):
+    #     cmds.warning("Stitch mesh relaxation requires a tessellated preview mesh.")
+    #     return
+
     if not STATE.is_tessellated or not STATE.preview_mesh or not cmds.objExists(STATE.preview_mesh):
-        cmds.warning("Stitch mesh relaxation requires a tessellated preview mesh.")
-        return
+        duplicates = cmds.duplicate(STATE.base_mesh, returnRootsOnly=True)
+        preview = cmds.rename(duplicates[0], _derived_node_name(STATE.base_mesh, "_base_relaxed_preview"))
+        STATE.t_mesh = preview
+        STATE.t_edge_map = STATE.edge_map
+        STATE.preview_mesh = preview
+        STATE.t_face_stitch_map = STATE.face_stitch_map
+        # meshToRelax = STATE.base_mesh
+        # meshToRelaxEdgeMap = STATE.edge_map
+    meshToRelax = STATE.t_mesh
+    meshToRelaxEdgeMap = STATE.t_edge_map
 
     if progress_callback:
         progress_callback(0, "Building smooth stitch target")
@@ -829,7 +841,7 @@ def apply_stitch_mesh_relaxation_before_generation(progress_callback=None):
                     12 + int((i + 1) * 88 / MESH_RELAXATION_ITERATIONS),
                     f"Relaxing stitch mesh {i + 1} of {MESH_RELAXATION_ITERATIONS}",
                 )
-            stitchMeshRelaxation(STATE.t_mesh, STATE.t_edge_map)
+            stitchMeshRelaxation(meshToRelax, meshToRelaxEdgeMap)
     finally:
         cmds.refresh(suspend=False)
         cmds.refresh()
