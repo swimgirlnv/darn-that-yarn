@@ -465,7 +465,8 @@ def append_purl_points(
         ( 0.48, -0.54, -0.18),  # outgoing to next stitch connection
     ]
     for u, v, n in LOCAL:
-        curve.append(_face_pt(face, u, v, n, width, height))
+        # subtract  to emphasize difference between knit and purl in knit patterns
+        curve.append(_face_pt(face, u, v, n-0.9, width, height))
 
 
 def append_yarnover_points(

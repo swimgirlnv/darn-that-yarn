@@ -6,6 +6,7 @@ from enum import Enum
 from dataclasses import dataclass
 import maya.mel as mel
 import math
+import re
 
 MESH_RELAXATION_ITERATIONS = 100
 MESH_RELAXATION_STEP = 0.35
@@ -1383,6 +1384,16 @@ def apply_pattern_fill(pattern_type="checker"):
         om.MGlobal.displayError("No base mesh. Select a mesh first.")
         return
 
+    # check if there are selected faces, only apply pattern to selected faces if so
+    selection = cmds.ls(selection=True, flatten=True)
+    # Filter for polygon faces
+    selected_faces = []
+    for sel in selection:
+        match = re.search(r'\.f\[(\d+)\]', sel)
+        if match:
+            face_id = int(match.group(1))
+            selected_faces.append(face_id)
+
     cmds.select(STATE.base_mesh, replace=True)
     sel = om.MGlobal.getActiveSelectionList()
     if sel.length() == 0:
@@ -1452,6 +1463,10 @@ def apply_pattern_fill(pattern_type="checker"):
         if face_id not in STATE.face_stitch_map:
             continue
         if not is_face_fully_assigned(dagPath, face_id):
+            continue
+        if selected_faces and face_id not in selected_faces:
+            print(selected_faces)
+            print(face_id)
             continue
         if STATE.face_stitch_map[face_id].edge_count != 4:
             continue  # increase/decrease faces (5-sided) keep their type
