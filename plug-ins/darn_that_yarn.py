@@ -12,6 +12,9 @@ MENU_LABEL = "Darn that Yarn!"
 _THIS_DIR = os.path.dirname(__file__)
 _REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, ".."))
 _SCRIPTS_DIR = os.path.join(_REPO_ROOT, "scripts")
+# put icon images in XBMLANGPATH
+if _THIS_DIR not in os.environ.get("XBMLANGPATH", ""):
+    os.environ["XBMLANGPATH"] = _THIS_DIR + os.pathsep + os.environ.get("XBMLANGPATH", "")
 
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)

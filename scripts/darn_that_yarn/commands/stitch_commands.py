@@ -6,8 +6,9 @@ from enum import Enum
 from dataclasses import dataclass
 import maya.mel as mel
 import math
+import re
 
-MESH_RELAXATION_ITERATIONS = 20
+MESH_RELAXATION_ITERATIONS = 60
 MESH_RELAXATION_STEP = 0.35
 MESH_RELAXATION_MAX_OFFSET_FRACTION = 0.25
 TESSELLATED_EDGE_CURVE_LIMIT = 450
@@ -810,9 +811,21 @@ def apply_stitch_mesh_relaxation_before_generation(progress_callback=None):
         return
     if STATE.preview_mesh_relaxed:
         return
+    # if not STATE.is_tessellated or not STATE.preview_mesh or not cmds.objExists(STATE.preview_mesh):
+    #     cmds.warning("Stitch mesh relaxation requires a tessellated preview mesh.")
+    #     return
+
     if not STATE.is_tessellated or not STATE.preview_mesh or not cmds.objExists(STATE.preview_mesh):
-        cmds.warning("Stitch mesh relaxation requires a tessellated preview mesh.")
-        return
+        duplicates = cmds.duplicate(STATE.base_mesh, returnRootsOnly=True)
+        preview = cmds.rename(duplicates[0], _derived_node_name(STATE.base_mesh, "_base_relaxed_preview"))
+        STATE.t_mesh = preview
+        STATE.t_edge_map = STATE.edge_map.copy()
+        STATE.preview_mesh = preview
+        STATE.t_face_stitch_map = STATE.face_stitch_map.copy()
+        # meshToRelax = STATE.base_mesh
+        # meshToRelaxEdgeMap = STATE.edge_map
+    meshToRelax = STATE.t_mesh
+    meshToRelaxEdgeMap = STATE.t_edge_map
 
     if progress_callback:
         progress_callback(0, "Building smooth stitch target")
@@ -829,7 +842,7 @@ def apply_stitch_mesh_relaxation_before_generation(progress_callback=None):
                     12 + int((i + 1) * 88 / MESH_RELAXATION_ITERATIONS),
                     f"Relaxing stitch mesh {i + 1} of {MESH_RELAXATION_ITERATIONS}",
                 )
-            stitchMeshRelaxation(STATE.t_mesh, STATE.t_edge_map)
+            stitchMeshRelaxation(meshToRelax, meshToRelaxEdgeMap)
     finally:
         cmds.refresh(suspend=False)
         cmds.refresh()
@@ -1371,6 +1384,16 @@ def apply_pattern_fill(pattern_type="checker"):
         om.MGlobal.displayError("No base mesh. Select a mesh first.")
         return
 
+    # check if there are selected faces, only apply pattern to selected faces if so
+    selection = cmds.ls(selection=True, flatten=True)
+    # Filter for polygon faces
+    selected_faces = []
+    for sel in selection:
+        match = re.search(r'\.f\[(\d+)\]', sel)
+        if match:
+            face_id = int(match.group(1))
+            selected_faces.append(face_id)
+
     cmds.select(STATE.base_mesh, replace=True)
     sel = om.MGlobal.getActiveSelectionList()
     if sel.length() == 0:
@@ -1440,6 +1463,10 @@ def apply_pattern_fill(pattern_type="checker"):
         if face_id not in STATE.face_stitch_map:
             continue
         if not is_face_fully_assigned(dagPath, face_id):
+            continue
+        if selected_faces and face_id not in selected_faces:
+            print(selected_faces)
+            print(face_id)
             continue
         if STATE.face_stitch_map[face_id].edge_count != 4:
             continue  # increase/decrease faces (5-sided) keep their type

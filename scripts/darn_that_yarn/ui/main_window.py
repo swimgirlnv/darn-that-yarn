@@ -3,6 +3,7 @@ import maya.mel as mel
 
 from darn_that_yarn.core.selection import get_selection_summary, get_selected_mesh_transform
 from darn_that_yarn.core.state import STATE
+from darn_that_yarn.commands.yarn_material import create_yarn_material_with_texture, clean_yarn_UVs, set_texture_image, assign_material_to_yarn_by_name
 from darn_that_yarn.commands.stitch_commands import (
     set_course_edges,
     set_stitch_type,
@@ -238,7 +239,7 @@ def _build_ui(parent):
     cmds.separator(height=10, style="in")
 
     UI["pattern_frame"] = cmds.frameLayout(
-        label="3. Choose Pattern",
+        label="3. Choose Knit Pattern",
         collapsable=True,
         marginWidth=8,
         marginHeight=8
@@ -251,23 +252,27 @@ def _build_ui(parent):
     )
     cmds.rowColumnLayout(
         numberOfColumns=2,
-        columnWidth=[(1, 155), (2, 155)],
+        columnWidth=[(1, 72), (2, 72)],
         columnSpacing=[(1, 6), (2, 6)]
     )
-    UI["checker_pattern_btn"] = cmds.button(
-        label="Checker\nK P K P\nP K P K",
+    UI["checker_pattern_btn"] = cmds.iconTextButton(
+        style="iconOnly",  # or "iconAndTextVertical" if you want both
+        image1=r"checkeredYarn.png",
         command=lambda *_: _handle_pattern_fill("checker"),
         enable=False,
         height=72,
+        width=72,
         bgc=(0.25, 0.35, 0.42),
         annotation=PATTERN_PREVIEWS["checker"][2]
     )
-    UI["rib_pattern_btn"] = cmds.button(
-        label="Rib\nK P K P\nK P K P",
+    UI["rib_pattern_btn"] = cmds.iconTextButton(
+        style="iconOnly",  # or "iconAndTextVertical" if you want both
+        image1=r"ribbedKnit.png", 
         command=lambda *_: _handle_pattern_fill("rib"),
         enable=False,
         height=72,
-        bgc=(0.32, 0.30, 0.42),
+        width=72,
+        bgc=(0.25, 0.35, 0.42),
         annotation=PATTERN_PREVIEWS["rib"][2]
     )
     cmds.setParent("..")
@@ -360,9 +365,49 @@ def _build_ui(parent):
 
     cmds.separator(height=10, style="none")
 
+    # Yarn Texturing section
+    UI["file_frame"] = cmds.frameLayout(
+        label="Generate Yarn Material",
+        collapsable=True,
+        marginWidth=8,
+        marginHeight=8
+    )
+    cmds.columnLayout(adj=True)
+
+    cmds.text(label="Select a texture file to apply to yarn material", align="left")
+
+    cmds.rowLayout(numberOfColumns=2, adjustableColumn=1, columnWidth2=(240, 100))
+
+    UI["texture_path_field"] = cmds.textField(
+        text="",
+        editable=False,
+        placeholderText="No file selected"
+    )
+
+    UI["browse_texture_btn"] = cmds.button(
+        label="Browse",
+        height=30,
+        command=lambda *_: _handle_browse_texture_file()
+    )
+
+    cmds.setParent("..")
+
+    UI["apply_yarn_texture_btn"] = cmds.button(
+        label="Apply Yarn Material",
+        height=30,
+        enable=False,
+        command=lambda *_: _handle_material_apply()
+    )
+
+
+    cmds.setParent("..")
+    cmds.setParent("..")
+
+    cmds.separator(height=10, style="none")
+
     UI["help_text"] = cmds.text(
         label=(
-            "Workflow: 1 Set mesh | 2 Label course edges | 3 Choose pattern | 4 Tessellate and generate."
+            "Workflow: 1 Set mesh | 2 Label course edges | 3 Choose knit pattern | 4 Tessellate and generate."
         ),
         align="left",
         wordWrap=True
@@ -417,9 +462,10 @@ def refresh_ui_state(*_):
         _set_status("Select a polygon mesh and click Set Active Mesh.")
         cmds.text(UI["selected_edges_label"], edit=True, label="Selected Edges: None")
         cmds.text(UI["selected_faces_label"], edit=True, label="Selected Faces: None")
+        cmds.iconTextButton(UI["checker_pattern_btn"], edit=True, enable=False)
+        cmds.iconTextButton(UI["rib_pattern_btn"], edit=True, enable=False)
         for key in ("set_course_btn", "set_stitch_btn", "flip_row_btn",
-                    "checker_pattern_btn", "rib_pattern_btn",
-                    "tessellate_btn", "restore_btn", "generate_btn"):
+                    "tessellate_btn", "restore_btn", "generate_btn", "apply_yarn_texture_btn"):
             cmds.button(UI[key], edit=True, enable=False)
         _set_pattern_preview(STATE.selected_pattern)
         return
@@ -441,6 +487,7 @@ def refresh_ui_state(*_):
         or len(STATE.active_faces) > 0
         or any(v.name == "COURSE" for v in STATE.edge_map.values())
     )
+    yarn_mesh_generated = STATE.yarn_mesh != None
 
     # only display possible stitch types by edge number in dropdown
     sel_faces_num_edges = get_selected_faces_edge_num()
@@ -459,10 +506,11 @@ def refresh_ui_state(*_):
     cmds.button(UI["set_course_btn"], edit=True, enable=has_edges)
     cmds.button(UI["set_stitch_btn"], edit=True, enable=has_faces and has_active_faces_selected)
     cmds.button(UI["flip_row_btn"], edit=True, enable=has_faces and has_active_faces_selected)
-    cmds.button(UI["checker_pattern_btn"], edit=True, enable=has_any_stitch_data)
-    cmds.button(UI["rib_pattern_btn"], edit=True, enable=has_any_stitch_data)
+    cmds.iconTextButton(UI["checker_pattern_btn"], edit=True, enable=has_any_stitch_data)
+    cmds.iconTextButton(UI["rib_pattern_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["tessellate_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["restore_btn"], edit=True, enable=STATE.is_tessellated)
+    cmds.button(UI["apply_yarn_texture_btn"], edit=True, enable=yarn_mesh_generated)
     cmds.button(UI["generate_btn"], edit=True, enable=has_any_stitch_data)
     _set_pattern_preview(STATE.selected_pattern)
 
@@ -543,3 +591,29 @@ def _handle_reset():
     init_stitch_face_data_structure()
     draw_course_edges_as_curves()
     refresh_ui_state()
+
+def _handle_browse_texture_file():
+    result = cmds.fileDialog2(
+        fileMode=1,  # 1 = single file
+        caption="Select Yarn Texture",
+        fileFilter="Images (*.png *.jpg *.jpeg *.tif *.tiff *.exr);;All Files (*.*)"
+    )
+
+    if not result:
+        return
+
+    file_path = result[0]
+
+    if "texture_path_field" in UI and cmds.textField(UI["texture_path_field"], exists=True):
+        cmds.textField(UI["texture_path_field"], edit=True, text=file_path)
+
+    STATE.yarn_texture_path = file_path  # optional if you want to store it
+    if STATE.yarn_material:
+        set_texture_image(STATE.yarn_material, STATE.yarn_texture_path)
+
+def _handle_material_apply():
+    if not STATE.yarn_material:
+        create_yarn_material_with_texture(STATE.yarn_texture_path)
+    if not STATE.yarn_uvs_clean:
+        clean_yarn_UVs()
+    assign_material_to_yarn_by_name(STATE.yarn_material)

@@ -31,6 +31,7 @@ import maya.cmds as cmds
 import maya.utils as maya_utils
 
 from darn_that_yarn.commands.stitch_commands import EdgeType, StitchType
+from darn_that_yarn.commands.yarn_material import assign_material_to_yarn_by_name, clean_yarn_UVs
 from darn_that_yarn.core.state import STATE
 
 
@@ -107,6 +108,8 @@ def update_yarn_tube_radius(radius: float, tube_segments: int = 8) -> List[str]:
                     tube_segments=tube_segments,
                     name=tube_name,
                 )
+                STATE.yarn_mesh = tube_node
+                STATE.yarn_uvs_clean = False
             except Exception as exc:
                 cmds.warning(  # type: ignore[attr-defined]
                     f"update_yarn_tube_radius: failed on {curve_node}: {exc}"
@@ -462,7 +465,8 @@ def append_purl_points(
         ( 0.48, -0.54, -0.18),  # outgoing to next stitch connection
     ]
     for u, v, n in LOCAL:
-        curve.append(_face_pt(face, u, v, n, width, height))
+        # subtract  to emphasize difference between knit and purl in knit patterns
+        curve.append(_face_pt(face, u, v, n-1, width, height))
 
 
 def append_yarnover_points(
@@ -1012,8 +1016,7 @@ def generate_yarn_curves(
     _old_base_mesh       = STATE.base_mesh
 
     if (
-        STATE.is_tessellated
-        and STATE.preview_mesh
+        STATE.preview_mesh
         and cmds.objExists(STATE.preview_mesh)  # type: ignore[attr-defined]
         and STATE.t_face_stitch_map
     ):
@@ -1353,6 +1356,8 @@ def _generate_rows(
                     name=tube_name,
                 )
                 if tube_node:
+                    STATE.yarn_mesh = tube_node
+                    STATE.yarn_uvs_clean = False
                     cmds.hide(curve_node)
                     created_nodes.append(tube_node)
                 else:
@@ -1549,12 +1554,92 @@ def _generate_rows(
             _emit_progress(f"Generating yarn ({processed_faces}/{total_faces} faces)")
             _yield_ui()
 
-    for row_idx in sorted(rows):
+    sorted_rows = sorted(rows)
+    face_to_next_row_face ={}
+    for row_idx in rows:
         face_list = rows[row_idx]
         is_closed_row = _row_is_closed(face_list)
 
         if is_closed_row:
             path_faces = _order_closed_row(face_list, spiral_start_ref)
+            # START OF DISORDERED ROWS FIX
+            disordered = False
+            edges_to_faces = {}
+            face_to_col ={}
+            checked_path_faces = []
+            for face_idx, (_col, fid) in enumerate(path_faces):
+                if face_idx + 1 < len(path_faces):
+                    _, next_fid = path_faces[face_idx + 1]
+                else:
+                    _, next_fid = path_faces[0]
+                face1 = f"{STATE.base_mesh}.f[{fid}]"
+                face2 = f"{STATE.base_mesh}.f[{next_fid}]"
+
+                # Get edges of face1
+                edges1 = cmds.polyListComponentConversion(face1, fromFace=True, toEdge=True)
+                edges1 = cmds.ls(edges1, flatten=True)
+                edges2 = cmds.polyListComponentConversion(face2, fromFace=True, toEdge=True)
+                edges2 = cmds.ls(edges2, flatten=True)
+
+                face_to_col[fid] = _col
+                for edge in edges1:
+                    if edge not in edges_to_faces:
+                        edges_to_faces[edge] = [fid]
+                    else:
+                        edges_to_faces[edge].append(fid)
+                
+                #shareEdge = bool(set(edges1) & set(edges2))
+                shared_edges = list(set(edges1) & set(edges2))
+                if shared_edges:
+                    shareEdge = shared_edges[0]
+                    share_Edge_index = int(shareEdge.split('[')[-1].rstrip(']'))
+                    if not (STATE.edge_map[share_Edge_index] != EdgeType.WALE):
+                        checked_path_faces.append(path_faces[face_idx])
+                else:
+                    disordered = True
+            ordered_fids = []
+            each_row_ordrd_fids = []
+            checked_path_faces_REPLACEMENT = []
+            numRowsIndx = -1
+            if disordered:
+                for i in range(len(path_faces)):
+                    _prevRealcol, prevRealFID = path_faces[i]
+                    if prevRealFID in ordered_fids:
+                        continue
+                    ordered_fids.append(prevRealFID)
+                    numRowsIndx += 1
+                    each_row_ordrd_fids.append([])
+                    for i in range(len(path_faces)):
+                        for face_idx, (_col, fid) in enumerate(path_faces):
+                            if face_idx == 0:
+                                continue
+                            
+                            face1 = f"{STATE.base_mesh}.f[{fid}]"
+                            face2 = f"{STATE.base_mesh}.f[{prevRealFID}]"
+
+                            # Get edges of face1
+                            edges1 = cmds.polyListComponentConversion(face1, fromFace=True, toEdge=True)
+                            edges1 = cmds.ls(edges1, flatten=True)
+                            edges2 = cmds.polyListComponentConversion(face2, fromFace=True, toEdge=True)
+                            edges2 = cmds.ls(edges2, flatten=True)
+                            
+                            shared_edges = list(set(edges1) & set(edges2))
+                            if shared_edges:
+                                shareEdge = shared_edges[0]
+                                share_Edge_index = int(shareEdge.split('[')[-1].rstrip(']'))
+                                if(STATE.edge_map[share_Edge_index] != EdgeType.WALE):
+                                    if STATE.edge_map[share_Edge_index] == EdgeType.COURSE:
+                                        if not face1 in face_to_next_row_face:
+                                            face_to_next_row_face[fid] = [prevRealFID]
+                                        else:
+                                            face_to_next_row_face[fid].append(prevRealFID)
+                                elif not fid in ordered_fids:
+                                    checked_path_faces.append(path_faces[face_idx])
+                                    _prevRealcol, prevRealFID = path_faces[face_idx]
+                                    ordered_fids.append(fid)
+                                    each_row_ordrd_fids[numRowsIndx].append(fid)
+            path_faces = checked_path_faces
+            # END OF DISORDERED ROWS FIX
             if path_faces:
                 spiral_start_ref = face_centroids.get(path_faces[0][1], spiral_start_ref)
             _append_row_points(
