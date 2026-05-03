@@ -1,3 +1,5 @@
+import os
+
 import maya.cmds as cmds
 import maya.mel as mel
 
@@ -13,6 +15,7 @@ from darn_that_yarn.commands.stitch_commands import (
     generate_knit_mesh,
     set_yarn_thickness,
     reset_stitch_mesh,
+    validate_stitch_mesh,
     init_stitch_face_data_structure,
     init_stitch_mesh_data_structures,
     draw_course_edges_as_curves,
@@ -31,6 +34,72 @@ WORKSPACE_NAME = "DarnThatYarnWorkspaceControl"
 _SCRIPT_JOB_IDS = []
 
 UI = {}
+_YARN_ONLY_ACTIVE = False
+
+_UI_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_UI_DIR, "..", "..", ".."))
+
+
+def _repo_asset_path(filename):
+    return os.path.join(_REPO_ROOT, filename).replace("\\", "/")
+
+
+def _node_exists(node):
+    return bool(node and cmds.objExists(node))
+
+
+def _set_node_visible(node, visible):
+    if _node_exists(node):
+        try:
+            cmds.setAttr(f"{node}.visibility", bool(visible))
+        except Exception:
+            pass
+
+
+def _set_yarn_nodes_visible(visible):
+    for prefix in (
+        "yarn_row_",
+        "yarn_tube_row_",
+        "yarn_fabric",
+        "yarn_tube_fabric",
+        "yarn_spiral",
+        "yarn_tube_spiral",
+    ):
+        for node in cmds.ls(prefix + "*", type="transform") or []:
+            _set_node_visible(node, visible)
+
+
+def _iter_authoring_nodes():
+    seen = set()
+    for node in (
+        STATE.selected_mesh,
+        STATE.base_mesh,
+        STATE.preview_mesh,
+        STATE.t_mesh,
+        STATE.smoothed_mesh,
+        "edge_type_indicator_grp",
+        "t_edge_type_indicator_grp",
+    ):
+        if _node_exists(node) and node not in seen:
+            seen.add(node)
+            yield node
+
+    for pattern in (
+        "*_tess_preview*",
+        "*_base_relaxed_preview*",
+        "*_smooth_target*",
+        "edge_type_indicator_grp*",
+        "t_edge_type_indicator_grp*",
+    ):
+        for node in cmds.ls(pattern, type="transform") or []:
+            if node not in seen:
+                seen.add(node)
+                yield node
+
+
+def _set_authoring_nodes_visible(visible):
+    for node in _iter_authoring_nodes():
+        _set_node_visible(node, visible)
 
 stitch_name_to_type_map = { "knit": StitchType.KNIT,
                             "purl": StitchType.PURL,
@@ -39,8 +108,13 @@ stitch_name_to_type_map = { "knit": StitchType.KNIT,
                             "decrease": StitchType.DECREASE}
 
 PATTERN_PREVIEWS = {
+    "stockinette": (
+        "Stockinette",
+        "K K K K\nK K K K\nK K K K",
+        "All assigned quad faces become knit stitches."
+    ),
     "checker": (
-        "Checker stockinette",
+        "Seed checker",
         "K P K P\nP K P K\nK P K P",
         "Alternates knit and purl by row and column."
     ),
@@ -49,6 +123,35 @@ PATTERN_PREVIEWS = {
         "K P K P\nK P K P\nK P K P",
         "Alternates knit and purl by column."
     ),
+    "wide_rib": (
+        "Wide rib",
+        "K K P P\nK K P P\nK K P P",
+        "Two-column knit/purl ribbing."
+    ),
+    "garter": (
+        "Garter rows",
+        "K K K K\nP P P P\nK K K K",
+        "Alternates knit and purl by row."
+    ),
+    "basket": (
+        "Basket weave",
+        "K K P P\nK K P P\nP P K K",
+        "Alternates two-by-two knit and purl blocks."
+    ),
+}
+
+PATTERN_ORDER = ("stockinette", "checker", "rib", "wide_rib", "garter", "basket")
+PATTERN_ICONS = {
+    "checker": "checkeredYarn.png",
+    "rib": "ribbedKnit.png",
+}
+PATTERN_COLORS = {
+    "stockinette": (0.24, 0.34, 0.30),
+    "checker": (0.25, 0.35, 0.42),
+    "rib": (0.32, 0.29, 0.38),
+    "wide_rib": (0.36, 0.31, 0.26),
+    "garter": (0.29, 0.33, 0.36),
+    "basket": (0.34, 0.30, 0.32),
 }
 
 
@@ -136,6 +239,12 @@ def _build_ui(parent):
 
     UI["status"] = cmds.text(
         label="Select a polygon mesh and click Set Active Mesh.",
+        align="left",
+        height=34,
+        wordWrap=True
+    )
+    UI["validation_status"] = cmds.text(
+        label="Mesh check: select an active mesh.",
         align="left",
         height=34,
         wordWrap=True
@@ -251,30 +360,27 @@ def _build_ui(parent):
         wordWrap=True
     )
     cmds.rowColumnLayout(
-        numberOfColumns=2,
-        columnWidth=[(1, 72), (2, 72)],
-        columnSpacing=[(1, 6), (2, 6)]
+        numberOfColumns=3,
+        columnWidth=[(1, 86), (2, 86), (3, 86)],
+        columnSpacing=[(1, 6), (2, 6), (3, 6)],
+        rowSpacing=[(1, 6), (2, 6)]
     )
-    UI["checker_pattern_btn"] = cmds.iconTextButton(
-        style="iconOnly",  # or "iconAndTextVertical" if you want both
-        image1=r"checkeredYarn.png",
-        command=lambda *_: _handle_pattern_fill("checker"),
-        enable=False,
-        height=72,
-        width=72,
-        bgc=(0.25, 0.35, 0.42),
-        annotation=PATTERN_PREVIEWS["checker"][2]
-    )
-    UI["rib_pattern_btn"] = cmds.iconTextButton(
-        style="iconOnly",  # or "iconAndTextVertical" if you want both
-        image1=r"ribbedKnit.png", 
-        command=lambda *_: _handle_pattern_fill("rib"),
-        enable=False,
-        height=72,
-        width=72,
-        bgc=(0.25, 0.35, 0.42),
-        annotation=PATTERN_PREVIEWS["rib"][2]
-    )
+    for pattern in PATTERN_ORDER:
+        title, _preview, note = PATTERN_PREVIEWS[pattern]
+        icon = PATTERN_ICONS.get(pattern)
+        button_args = {
+            "label": title,
+            "style": "iconAndTextVertical" if icon else "textOnly",
+            "command": lambda *_args, pattern=pattern: _handle_pattern_fill(pattern),
+            "enable": False,
+            "height": 72,
+            "width": 86,
+            "bgc": PATTERN_COLORS.get(pattern, (0.25, 0.35, 0.42)),
+            "annotation": note,
+        }
+        if icon:
+            button_args["image1"] = _repo_asset_path(icon)
+        UI[f"{pattern}_pattern_btn"] = cmds.iconTextButton(**button_args)
     cmds.setParent("..")
     UI["pattern_preview"] = cmds.text(
         label="Pattern preview: choose a pattern after assigning course/wale edges.",
@@ -341,15 +447,17 @@ def _build_ui(parent):
     )
 
     UI["yarn_radius_slider"] = cmds.floatSliderGrp(
-        label="Yarn Thickness",
+        label="Yarn Radius",
         field=True,
-        minValue=0.01,
-        maxValue=0.50,
+        precision=3,
+        step=0.001,
+        minValue=0.005,
+        maxValue=0.08,
         fieldMinValue=0.001,
-        fieldMaxValue=2.0,
+        fieldMaxValue=0.20,
         value=STATE.yarn_radius,
         changeCommand=lambda value: _handle_yarn_radius_changed(value),
-        annotation="Controls yarn tube radius. After generation, changing this rebuilds the yarn tube meshes from the hidden curves."
+        annotation="Controls yarn tube radius. 0.020 is the default visual target; after generation, changing this rebuilds the yarn tube meshes from the hidden curves."
     )
 
     UI["generate_btn"] = cmds.button(
@@ -358,6 +466,16 @@ def _build_ui(parent):
         enable=False,
         height=36,
         annotation="Runs the full pipeline: tessellate, optional mesh relaxation, yarn curve generation, and optional yarn-level relaxation."
+    )
+
+    cmds.separator(height=8, style="none")
+
+    UI["yarn_only_btn"] = cmds.button(
+        label="Show Yarn Only",
+        command=lambda *_: _handle_yarn_only_toggle(),
+        enable=False,
+        height=30,
+        annotation="Hides the original mesh, tessellation preview, and edge guide curves so only generated yarn remains visible. Click again to restore authoring nodes."
     )
 
     cmds.setParent("..")
@@ -460,12 +578,14 @@ def refresh_ui_state(*_):
 
     if not has_mesh:
         _set_status("Select a polygon mesh and click Set Active Mesh.")
+        cmds.text(UI["validation_status"], edit=True, label="Mesh check: select an active mesh.")
         cmds.text(UI["selected_edges_label"], edit=True, label="Selected Edges: None")
         cmds.text(UI["selected_faces_label"], edit=True, label="Selected Faces: None")
-        cmds.iconTextButton(UI["checker_pattern_btn"], edit=True, enable=False)
-        cmds.iconTextButton(UI["rib_pattern_btn"], edit=True, enable=False)
+        for pattern in PATTERN_ORDER:
+            cmds.iconTextButton(UI[f"{pattern}_pattern_btn"], edit=True, enable=False)
         for key in ("set_course_btn", "set_stitch_btn", "flip_row_btn",
-                    "tessellate_btn", "restore_btn", "generate_btn", "apply_yarn_texture_btn"):
+                    "tessellate_btn", "restore_btn", "generate_btn", "apply_yarn_texture_btn",
+                    "yarn_only_btn"):
             cmds.button(UI[key], edit=True, enable=False)
         _set_pattern_preview(STATE.selected_pattern)
         return
@@ -482,6 +602,7 @@ def refresh_ui_state(*_):
     has_edges = len(edges) > 0
     has_faces = len(faces) > 0
     has_active_faces_selected = are_selected_faces_active()
+    validation = validate_stitch_mesh()
     has_any_stitch_data = (
         len(STATE.course_edges) > 0
         or len(STATE.active_faces) > 0
@@ -506,12 +627,19 @@ def refresh_ui_state(*_):
     cmds.button(UI["set_course_btn"], edit=True, enable=has_edges)
     cmds.button(UI["set_stitch_btn"], edit=True, enable=has_faces and has_active_faces_selected)
     cmds.button(UI["flip_row_btn"], edit=True, enable=has_faces and has_active_faces_selected)
-    cmds.iconTextButton(UI["checker_pattern_btn"], edit=True, enable=has_any_stitch_data)
-    cmds.iconTextButton(UI["rib_pattern_btn"], edit=True, enable=has_any_stitch_data)
+    for pattern in PATTERN_ORDER:
+        cmds.iconTextButton(UI[f"{pattern}_pattern_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["tessellate_btn"], edit=True, enable=has_any_stitch_data)
     cmds.button(UI["restore_btn"], edit=True, enable=STATE.is_tessellated)
     cmds.button(UI["apply_yarn_texture_btn"], edit=True, enable=yarn_mesh_generated)
-    cmds.button(UI["generate_btn"], edit=True, enable=has_any_stitch_data)
+    cmds.button(UI["generate_btn"], edit=True, enable=validation.can_generate)
+    cmds.button(
+        UI["yarn_only_btn"],
+        edit=True,
+        enable=yarn_mesh_generated,
+        label="Restore Authoring View" if _YARN_ONLY_ACTIVE else "Show Yarn Only",
+    )
+    cmds.text(UI["validation_status"], edit=True, label=validation.summary())
     _set_pattern_preview(STATE.selected_pattern)
 
 def show_no_mesh_selected_warning():
@@ -574,6 +702,19 @@ def _handle_yarn_radius_changed(value):
 
 def _handle_generate():
     generate_knit_mesh()
+    refresh_ui_state()
+
+
+def _handle_yarn_only_toggle():
+    global _YARN_ONLY_ACTIVE
+    if not STATE.yarn_mesh:
+        return
+
+    _YARN_ONLY_ACTIVE = not _YARN_ONLY_ACTIVE
+    _set_authoring_nodes_visible(not _YARN_ONLY_ACTIVE)
+    _set_yarn_nodes_visible(True)
+    _set_status("Yarn-only view." if _YARN_ONLY_ACTIVE else f"Active mesh: {STATE.base_mesh}")
+    refresh_ui_state()
 
 
 def _handle_pattern_fill(pattern=None):

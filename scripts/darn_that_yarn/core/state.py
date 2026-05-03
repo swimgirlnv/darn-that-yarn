@@ -16,7 +16,7 @@ class StitchToolState:
     row_directions: Dict[str, int] = field(default_factory=dict)  # row_id -> 1 or -1
     tessellation_level: int = 1
     selected_pattern: str = "checker"
-    yarn_radius: float = 0.14
+    yarn_radius: float = 0.02
     mesh_relaxation_enabled: bool = True
     yarn_relaxation_enabled: bool = True
     preview_mesh: Optional[str] = None
@@ -44,7 +44,7 @@ class StitchToolState:
         self.row_directions.clear()
         self.tessellation_level = 1
         self.selected_pattern = "checker"
-        self.yarn_radius = 0.14
+        self.yarn_radius = 0.02
         self.mesh_relaxation_enabled = True
         self.yarn_relaxation_enabled = True
         self.preview_mesh = None
