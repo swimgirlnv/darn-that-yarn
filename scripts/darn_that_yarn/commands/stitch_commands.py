@@ -3,7 +3,8 @@ import maya.cmds as cmds
 from darn_that_yarn.core.state import STATE
 import maya.api.OpenMaya as om
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 import maya.mel as mel
 import math
 import re
@@ -501,6 +502,7 @@ def apply_vertex_offsets(
     {vertex_id: om.MVector}
     """
     mesh_fn = om.MFnMesh(dagPath)
+    points = mesh_fn.getPoints(space)
 
     for vtx_id, offset in vertex_offset_map.items():
         if step_scale != 1.0:
@@ -511,17 +513,16 @@ def apply_vertex_offsets(
                 offset = (offset / offset_len) * max_offset
 
         # current position
-        p = mesh_fn.getPoint(vtx_id, space)
+        p = points[vtx_id]
 
         # apply offset
-        new_p = om.MPoint(
+        points[vtx_id] = om.MPoint(
             p.x + offset.x,
             p.y + offset.y,
             p.z + offset.z
         )
 
-        # write back
-        mesh_fn.setPoint(vtx_id, new_p, space)
+    mesh_fn.setPoints(points, space)
 
 def stitchMeshRelaxation(mesh, edge_data):
     mesh_sel = om.MSelectionList() 
@@ -758,6 +759,11 @@ def generate_knit_mesh():
     """
     from darn_that_yarn.commands.yarn_curve import generate_yarn_curves
 
+    validation = validate_stitch_mesh()
+    if not validation.can_generate:
+        cmds.warning(validation.summary())
+        return
+
     cmds.progressWindow(
         title="Generate Knit Mesh",
         progress=0,
@@ -922,6 +928,174 @@ class FaceStitchData:
     stitch_type: StitchType
     stitch_dir: StitchDir
     edge_count: int
+
+
+@dataclass
+class StitchMeshValidation:
+    mesh: Optional[str]
+    face_count: int = 0
+    assigned_faces: int = 0
+    stitch_faces: int = 0
+    unassigned_faces: int = 0
+    invalid_faces: int = 0
+    invalid_edges: int = 0
+    connected_components: int = 0
+    messages: List[str] = field(default_factory=list)
+
+    @property
+    def can_generate(self):
+        return self.mesh is not None and self.stitch_faces > 0 and self.invalid_faces == 0
+
+    def summary(self):
+        if not self.mesh:
+            return "Mesh check: select an active mesh."
+        if self.can_generate:
+            return (
+                f"Mesh check: ready. {self.stitch_faces}/{self.face_count} stitch faces, "
+                f"{self.connected_components} island(s)."
+            )
+        if self.messages:
+            return "Mesh check: " + self.messages[0]
+        return "Mesh check: not ready."
+
+
+def _edge_type_name(edge_type):
+    return getattr(edge_type, "name", str(edge_type))
+
+
+def _stitch_type_name(stitch_type):
+    return getattr(stitch_type, "name", str(stitch_type))
+
+
+def _get_mesh_adjacency(mesh, face_map):
+    dag_path = _mesh_dag_path(mesh)
+    edge_to_faces: Dict[int, List[int]] = {}
+    face_edges: Dict[int, Tuple[int, ...]] = {}
+
+    face_iter = om.MItMeshPolygon(dag_path)
+    while not face_iter.isDone():
+        face_id = face_iter.index()
+        if face_id in face_map:
+            edges = tuple(face_iter.getEdges())
+            face_edges[face_id] = edges
+            for edge_id in edges:
+                edge_to_faces.setdefault(edge_id, []).append(face_id)
+        face_iter.next()
+
+    face_adj = {face_id: [] for face_id in face_map}
+    for edge_id, face_ids in edge_to_faces.items():
+        if len(face_ids) == 2:
+            f0, f1 = face_ids
+            face_adj[f0].append((f1, edge_id))
+            face_adj[f1].append((f0, edge_id))
+
+    return dag_path, face_edges, face_adj
+
+
+def validate_stitch_mesh(mesh=None, face_map=None, edge_map=None):
+    mesh = mesh or (
+        STATE.preview_mesh
+        if STATE.preview_mesh and STATE.t_face_stitch_map
+        else STATE.base_mesh
+    )
+    face_map = face_map if face_map is not None else (
+        STATE.t_face_stitch_map
+        if mesh == STATE.preview_mesh and STATE.t_face_stitch_map
+        else STATE.face_stitch_map
+    )
+    edge_map = edge_map if edge_map is not None else (
+        STATE.t_edge_map
+        if mesh == STATE.preview_mesh and STATE.t_edge_map
+        else STATE.edge_map
+    )
+
+    result = StitchMeshValidation(mesh=mesh)
+
+    if not mesh or not cmds.objExists(mesh):
+        result.messages.append("active mesh is missing.")
+        return result
+    if not face_map:
+        result.messages.append("stitch face data is missing.")
+        return result
+
+    try:
+        _dag_path, face_edges, face_adj = _get_mesh_adjacency(mesh, face_map)
+    except Exception:
+        result.messages.append("active object is not a polygon mesh.")
+        return result
+
+    result.face_count = len(face_map)
+    visited = set()
+    for face_id in face_map:
+        if face_id in visited:
+            continue
+        result.connected_components += 1
+        stack = [face_id]
+        visited.add(face_id)
+        while stack:
+            current = stack.pop()
+            for nbr_face, _shared_edge in face_adj.get(current, []):
+                if nbr_face not in visited:
+                    visited.add(nbr_face)
+                    stack.append(nbr_face)
+
+    for face_id, face_data in face_map.items():
+        edge_ids = face_edges.get(face_id, ())
+        if not edge_ids:
+            result.invalid_faces += 1
+            continue
+
+        missing_edges = [
+            edge_id for edge_id in edge_ids
+            if _edge_type_name(edge_map.get(edge_id, EdgeType.UNASSIGNED)) == "UNASSIGNED"
+        ]
+        if missing_edges:
+            result.unassigned_faces += 1
+            continue
+
+        result.assigned_faces += 1
+        wale_count = sum(
+            _edge_type_name(edge_map.get(edge_id, EdgeType.UNASSIGNED)) == "WALE"
+            for edge_id in edge_ids
+        )
+        course_count = sum(
+            _edge_type_name(edge_map.get(edge_id, EdgeType.UNASSIGNED)) == "COURSE"
+            for edge_id in edge_ids
+        )
+        stitch_name = _stitch_type_name(face_data.stitch_type)
+
+        if wale_count != 2:
+            result.invalid_faces += 1
+            continue
+        if course_count < 1:
+            result.invalid_faces += 1
+            continue
+        if stitch_name == "NOTASSIGNED":
+            result.unassigned_faces += 1
+            continue
+        if stitch_name in ("KNIT", "PURL", "YARNOVER") and face_data.edge_count != 4:
+            result.invalid_faces += 1
+            continue
+        if stitch_name in ("INCREASE", "DECREASE") and face_data.edge_count != 5:
+            result.invalid_faces += 1
+            continue
+
+        result.stitch_faces += 1
+
+    result.invalid_edges = sum(
+        1
+        for edge_type in edge_map.values()
+        if _edge_type_name(edge_type) not in ("UNASSIGNED", "COURSE", "WALE")
+    )
+
+    if result.invalid_faces:
+        result.messages.append(f"{result.invalid_faces} invalid face(s); check wale/course labels and stitch types.")
+    elif result.stitch_faces == 0:
+        result.messages.append("no valid stitch faces; assign a pattern or stitch type first.")
+    elif result.unassigned_faces:
+        result.messages.append(f"ready with {result.unassigned_faces} unassigned/skipped face(s).")
+
+    return result
 
 stitch_color_map = {
     StitchType.NOTASSIGNED: om.MColor((0.25, 0.25, 0.28)),  # soft charcoal
@@ -1371,8 +1545,12 @@ def apply_pattern_fill(pattern_type="checker"):
     advance the row coordinate and across WALE edges to advance the column.
 
     pattern_type:
+        "stockinette" - all knit
         "checker" - alternates k/p in both row and column (row+col parity)
         "rib"     - alternates k/p by column only (col parity)
+        "wide_rib" - two-column knit/purl ribbing
+        "garter" - alternates k/p by row only
+        "basket" - two-by-two checker blocks
     """
     from collections import deque
 
@@ -1465,13 +1643,22 @@ def apply_pattern_fill(pattern_type="checker"):
         if not is_face_fully_assigned(dagPath, face_id):
             continue
         if selected_faces and face_id not in selected_faces:
-            print(selected_faces)
-            print(face_id)
             continue
         if STATE.face_stitch_map[face_id].edge_count != 4:
             continue  # increase/decrease faces (5-sided) keep their type
 
-        parity = (row + col) % 2 if pattern_type == "checker" else col % 2
+        if pattern_type == "stockinette":
+            parity = 0
+        elif pattern_type == "rib":
+            parity = col % 2
+        elif pattern_type == "wide_rib":
+            parity = (col // 2) % 2
+        elif pattern_type == "garter":
+            parity = row % 2
+        elif pattern_type == "basket":
+            parity = ((row // 2) + (col // 2)) % 2
+        else:
+            parity = (row + col) % 2
         STATE.face_stitch_map[face_id].stitch_type = StitchType.KNIT if parity == 0 else StitchType.PURL
         updated += 1
 

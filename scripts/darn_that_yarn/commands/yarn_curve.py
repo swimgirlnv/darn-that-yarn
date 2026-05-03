@@ -54,7 +54,7 @@ YARN_CURVE_PREFIXES = (
     "yarn_spiral",
 )
 
-DEFAULT_YARN_RADIUS = 0.08
+DEFAULT_YARN_RADIUS = 0.02
 YARN_RADIUS_STITCH_FRACTION = 0.14
 DEFAULT_ROW_CHUNK_SIZE = 24
 DEFAULT_MAX_POINTS_PER_CURVE = 30000
@@ -175,10 +175,12 @@ class YarnCurve:
         pts = [(p.x, p.y, p.z) for p in self.points]
 
         if closed and degree == 3:
-            # per=True creates a periodic cubic NURBS that closes smoothly.
-            # Maya connects the last CV back to the first, forming the
-            # connecting arc that wraps the yarn around the back of the tube.
-            return cmds.curve(p=pts, d=degree, per=True, name=name)
+            # Avoid cmds.curve(per=True): Maya requires fragile explicit knot
+            # data and will fail closed rows if it is even slightly off. The
+            # tube builder receives the closed flag separately and closes the
+            # mesh topology, so the source curve stays non-periodic to keep
+            # endpoint tangents stable.
+            return cmds.curve(ep=pts, d=degree, name=name)
 
         # Use edit points for open rows so the yarn actually passes through
         # the authored over/under pull-through positions.  CV-only curves can
@@ -785,6 +787,7 @@ def add_tube_geometry(
     tube_segments: int = 6,
     sample_count: int = 0,
     name: str = "yarn_tube",
+    force_closed: bool = False,
 ) -> str:
     """
     Build a polygonal tube mesh swept around an existing Maya NURBS curve.
@@ -830,13 +833,13 @@ def add_tube_geometry(
         curve_name, shapes=True, type="nurbsCurve"
     ) or []
     shape = shape_nodes[0] if shape_nodes else ""
-    is_closed_curve = False
+    is_closed_curve = bool(force_closed)
     if shape:
         try:
             # Maya NURBS form: 0=open, 1=closed, 2=periodic.
-            is_closed_curve = int(cmds.getAttr(shape + ".form")) in (1, 2)
+            is_closed_curve = is_closed_curve or int(cmds.getAttr(shape + ".form")) in (1, 2)
         except Exception:
-            is_closed_curve = False
+            is_closed_curve = bool(force_closed)
 
     if sample_count <= 0:
         spans = int(cmds.getAttr(shape + ".spans")) if shape else 4
@@ -862,7 +865,7 @@ def add_tube_geometry(
     # ------------------------------------------------------------------
     # Sample curve positions and tangents.
     # ------------------------------------------------------------------
-    samples = _sample_curve(curve_name, sample_count, closed=is_closed_curve)
+    samples = _sample_curve(curve_name, sample_count, closed=False)
     if len(samples) < 2:
         om.MGlobal.displayError("add_tube_geometry: curve too short to sample.")
         return ""
@@ -1098,23 +1101,33 @@ def _generate_yarn_curves_impl(
             face_adj[f1].append((f0, eid))
 
     # ── BFS to assign (row, col) coordinates ──────────────────────────────
+    # Run one deterministic traversal per connected component. Starting from
+    # the lowest face id keeps repeated generations stable across sessions.
     face_coords: dict = {}
-    start_face = next(iter(STATE.face_stitch_map))
-    queue: deque = deque([(start_face, 0, 0)])
-    face_coords[start_face] = (0, 0)
+    component_row_offset = 0
+    for start_face in sorted(STATE.face_stitch_map):
+        if start_face in face_coords:
+            continue
 
-    while queue:
-        fid, row, col = queue.popleft()
-        for nbr_face, shared_edge in face_adj.get(fid, []):
-            if nbr_face in face_coords:
-                continue
-            etype = STATE.edge_map.get(shared_edge, EdgeType.UNASSIGNED)
-            if getattr(etype, "name", str(etype)) == "COURSE":
-                new_row, new_col = row + 1, col
-            else:
-                new_row, new_col = row, col + 1  # WALE or unassigned
-            face_coords[nbr_face] = (new_row, new_col)
-            queue.append((nbr_face, new_row, new_col))
+        queue: deque = deque([(start_face, component_row_offset, 0)])
+        face_coords[start_face] = (component_row_offset, 0)
+        component_rows = {component_row_offset}
+
+        while queue:
+            fid, row, col = queue.popleft()
+            for nbr_face, shared_edge in sorted(face_adj.get(fid, [])):
+                if nbr_face in face_coords:
+                    continue
+                etype = STATE.edge_map.get(shared_edge, EdgeType.UNASSIGNED)
+                if getattr(etype, "name", str(etype)) == "COURSE":
+                    new_row, new_col = row + 1, col
+                else:
+                    new_row, new_col = row, col + 1  # WALE or unassigned
+                face_coords[nbr_face] = (new_row, new_col)
+                component_rows.add(new_row)
+                queue.append((nbr_face, new_row, new_col))
+
+        component_row_offset = max(component_rows) + 2
 
     # ── Group faces by row ─────────────────────────────────────────────────
     rows: dict = {}
@@ -1248,31 +1261,19 @@ def _generate_rows(
         else max(DEFAULT_YARN_RADIUS, median_stitch_scale * YARN_RADIUS_STITCH_FRACTION)
     )
 
-    def _row_is_closed(face_list: list) -> bool:
+    def _distance_between_faces(fid_a: int, fid_b: int) -> float:
+        if fid_a not in face_centroids or fid_b not in face_centroids:
+            return float("inf")
+        ca = face_centroids[fid_a]
+        cb = face_centroids[fid_b]
+        return math.sqrt(
+            (cb[0] - ca[0]) ** 2
+            + (cb[1] - ca[1]) ** 2
+            + (cb[2] - ca[2]) ** 2
+        )
+
+    def _row_wale_neighbors(face_list: list) -> dict:
         row_fids = {fid for _, fid in face_list}
-        if len(row_fids) < 3:
-            return False
-
-        for fid in row_fids:
-            wale_neighbor_count = 0
-            for nbr_fid, shared_eid in face_adj.get(fid, []):
-                if nbr_fid not in row_fids:
-                    continue
-                etype = STATE.edge_map.get(shared_eid, EdgeType.UNASSIGNED)
-                if getattr(etype, "name", str(etype)) == "WALE":
-                    wale_neighbor_count += 1
-            if wale_neighbor_count < 2:
-                return False
-        return True
-
-    def _order_closed_row(
-        face_list: list,
-        preferred_start: Optional[Tuple[float, float, float]] = None,
-    ) -> list:
-        row_fids = {fid for _, fid in face_list}
-        if len(row_fids) < 3:
-            return face_list
-
         wale_neighbors = {fid: [] for fid in row_fids}
         for fid in row_fids:
             for nbr_fid, shared_eid in face_adj.get(fid, []):
@@ -1281,8 +1282,62 @@ def _generate_rows(
                 etype = STATE.edge_map.get(shared_eid, EdgeType.UNASSIGNED)
                 if getattr(etype, "name", str(etype)) == "WALE":
                     wale_neighbors[fid].append(nbr_fid)
+        return wale_neighbors
 
-        if preferred_start is None:
+    def _row_endpoint_fids(face_list: list) -> List[int]:
+        wale_neighbors = _row_wale_neighbors(face_list)
+        return [fid for fid, nbrs in wale_neighbors.items() if len(nbrs) <= 1]
+
+    def _median_wale_spacing(face_list: list) -> float:
+        distances = []
+        for fid, nbrs in _row_wale_neighbors(face_list).items():
+            for nbr in nbrs:
+                if fid < nbr:
+                    dist = _distance_between_faces(fid, nbr)
+                    if math.isfinite(dist) and dist > 1e-8:
+                        distances.append(dist)
+        if not distances:
+            return 0.0
+        distances.sort()
+        return distances[len(distances) // 2]
+
+    def _row_is_closed(face_list: list) -> bool:
+        row_fids = {fid for _, fid in face_list}
+        if len(row_fids) < 3:
+            return False
+
+        wale_neighbors = _row_wale_neighbors(face_list)
+        if all(len(nbrs) >= 2 for nbrs in wale_neighbors.values()):
+            return True
+
+        endpoints = [fid for fid, nbrs in wale_neighbors.items() if len(nbrs) == 1]
+        if len(endpoints) != 2:
+            return False
+
+        median_spacing = _median_wale_spacing(face_list)
+        if median_spacing <= 1e-8:
+            return False
+
+        # If the two topology endpoints are physically adjacent, this is a
+        # split seam on a cylindrical row. Treat it as closed to avoid bottom
+        # edge side-return loops.
+        return _distance_between_faces(endpoints[0], endpoints[1]) <= median_spacing * 1.75
+
+    def _order_row_by_wale(
+        face_list: list,
+        closed_row: bool,
+        preferred_start: Optional[Tuple[float, float, float]] = None,
+    ) -> list:
+        row_fids = {fid for _, fid in face_list}
+        if len(row_fids) < 3:
+            return face_list
+
+        wale_neighbors = _row_wale_neighbors(face_list)
+        endpoints = [fid for fid, nbrs in wale_neighbors.items() if len(nbrs) <= 1]
+
+        if not closed_row and endpoints:
+            start_fid = min(endpoints)
+        elif preferred_start is None:
             start_fid = face_list[0][1]
         else:
             sx, sy, sz = preferred_start
@@ -1309,10 +1364,23 @@ def _generate_rows(
                     if nbr not in ordered_fids
                 ]
             if not candidates:
+                if closed_row:
+                    remaining = [fid for fid in row_fids if fid not in ordered_fids]
+                    if not remaining:
+                        break
+                    candidates = [
+                        min(remaining, key=lambda fid: _distance_between_faces(cur_fid, fid))
+                    ]
+                else:
+                    break
+            if not candidates:
                 return face_list
             next_fid = candidates[0]
             ordered_fids.append(next_fid)
             prev_fid, cur_fid = cur_fid, next_fid
+
+        if len(ordered_fids) != len(row_fids):
+            return face_list
 
         return [(idx, fid) for idx, fid in enumerate(ordered_fids)]
 
@@ -1354,6 +1422,7 @@ def _generate_rows(
                     radius=effective_yarn_radius,
                     tube_segments=tube_segments,
                     name=tube_name,
+                    force_closed=closed,
                 )
                 if tube_node:
                     STATE.yarn_mesh = tube_node
@@ -1378,10 +1447,11 @@ def _generate_rows(
         face_list: list,
         curve: YarnCurve,
         closed_row: bool = False,
+        incoming_anchor: Optional[om.MPoint] = None,
         per_face_callback: Optional[Callable[[YarnCurve], None]] = None,
-    ) -> None:
-        is_first_row = (row_idx == min_row)
-        is_last_row  = (row_idx == max_row)
+    ) -> Optional[om.MPoint]:
+        is_first_row = (row_idx - 1) not in rows
+        is_last_row  = (row_idx + 1) not in rows
 
         # Reference vector: points from current row centroid toward next row.
         # Used to flip wale_axis into a consistent "upward" orientation.
@@ -1470,8 +1540,23 @@ def _generate_rows(
                             -ctx.course_axis.z,
                         )
 
-            # Cast-on once before the first stitch of the row.
-            if is_first_row and face_idx == 0:
+            if incoming_anchor is not None and face_idx == 0 and not closed_row:
+                entry_pt = _face_pt(ctx, -0.50, -0.54, 0.0, width, height)
+                dx = entry_pt.x - incoming_anchor.x
+                dy = entry_pt.y - incoming_anchor.y
+                dz = entry_pt.z - incoming_anchor.z
+                if (dx * dx + dy * dy + dz * dz) > 1e-8:
+                    curve.append(
+                        om.MPoint(
+                            (incoming_anchor.x + entry_pt.x) * 0.5 + ctx.normal.x * height * 0.45,
+                            (incoming_anchor.y + entry_pt.y) * 0.5 + ctx.normal.y * height * 0.45,
+                            (incoming_anchor.z + entry_pt.z) * 0.5 + ctx.normal.z * height * 0.45,
+                        )
+                    )
+
+            # Border points are only applied to open fabric endpoints. Closed
+            # tube rows should not get repeated side-return scallops.
+            if is_first_row and face_idx == 0 and not closed_row:
                 append_cast_on_points(curve, width, height, ctx)
 
             # Main stitch shape (skip NOTASSIGNED faces).
@@ -1479,185 +1564,82 @@ def _generate_rows(
             if face_data.stitch_type.name != "NOTASSIGNED":
                 append_stitch_points(curve, width, height, face_data.stitch_type, ctx)
 
-            # Bind-off once after the last stitch of the row.
-            if is_last_row and face_idx == len(face_list) - 1:
+            if is_last_row and face_idx == len(face_list) - 1 and not closed_row:
                 append_bind_off_points(curve, width, height, ctx)
 
             if per_face_callback:
                 per_face_callback(curve)
 
-    # Open cloth uses one continuous strand that snakes across rows.  Tube
-    # rows use one open spiral strand: each completed circumference advances
-    # to the next row at the seam instead of closing each row as a ring.  This
-    # avoids periodic curve chords through the cylinder interior.
-    open_curve = YarnCurve()
+        return curve.points[-1] if curve.points else incoming_anchor
+
+    # Generate each course row independently. A physically continuous strand
+    # needs explicit side-turn and seam logic; until that is robust, row-local
+    # curves avoid the large cross-row arcs that corrupt mesh boundaries.
     open_row_count = 0
-    open_segment_index = 1
-    spiral_curve = YarnCurve()
-    spiral_segment_index = 1
     spiral_start_ref: Optional[Tuple[float, float, float]] = None
 
-    def _next_segment_name(base: str, index: int) -> str:
-        if index == 1:
-            return base
-        return f"{base}_part_{index:04d}"
-
-    def _flush_open_curve(force: bool = False) -> None:
-        nonlocal open_segment_index
-        if len(open_curve.points) < 2:
-            return
-        if not force and len(open_curve.points) < max_points_per_curve:
-            return
-
-        _materialize_curve(
-            open_curve,
-            min_row,
-            closed=False,
-            curve_name=_next_segment_name("yarn_fabric", open_segment_index),
-            tube_name=_next_segment_name("yarn_tube_fabric", open_segment_index),
-        )
-        open_segment_index += 1
-
-        open_curve.points = open_curve.points[-2:] if len(open_curve.points) >= 2 else open_curve.points[-1:]
-
-    def _flush_spiral_curve(force: bool = False) -> None:
-        nonlocal spiral_segment_index
-        if len(spiral_curve.points) < 2:
-            return
-        if not force and len(spiral_curve.points) < max_points_per_curve:
-            return
-
-        _materialize_curve(
-            spiral_curve,
-            min_row,
-            closed=False,
-            curve_name=_next_segment_name("yarn_spiral", spiral_segment_index),
-            tube_name=_next_segment_name("yarn_tube_spiral", spiral_segment_index),
-        )
-        spiral_segment_index += 1
-
-        spiral_curve.points = spiral_curve.points[-2:] if len(spiral_curve.points) >= 2 else spiral_curve.points[-1:]
-
-    def _on_face_processed_open(curve: YarnCurve) -> None:
+    def _on_face_processed_row(curve: YarnCurve) -> None:
         nonlocal processed_faces
         processed_faces += 1
-        _flush_open_curve(force=False)
         if processed_faces % ui_yield_face_interval == 0:
             _emit_progress(f"Generating yarn ({processed_faces}/{total_faces} faces)")
             _yield_ui()
 
-    def _on_face_processed_spiral(curve: YarnCurve) -> None:
-        nonlocal processed_faces
-        processed_faces += 1
-        _flush_spiral_curve(force=False)
-        if processed_faces % ui_yield_face_interval == 0:
-            _emit_progress(f"Generating yarn ({processed_faces}/{total_faces} faces)")
-            _yield_ui()
+    row_closed_map = {
+        row_idx: _row_is_closed(face_list)
+        for row_idx, face_list in rows.items()
+    }
+    closed_row_count = sum(1 for is_closed in row_closed_map.values() if is_closed)
+    tube_like_mesh = (
+        len(row_closed_map) >= 2
+        and closed_row_count >= max(2, int(math.ceil(len(row_closed_map) * 0.5)))
+    )
 
-    sorted_rows = sorted(rows)
-    face_to_next_row_face ={}
-    for row_idx in rows:
+    for row_idx in sorted(rows):
+        if row_idx - 1 not in rows and processed_rows > 0:
+            open_row_count = 0
+            spiral_start_ref = None
+
         face_list = rows[row_idx]
-        is_closed_row = _row_is_closed(face_list)
+        is_closed_row = row_closed_map[row_idx] or tube_like_mesh
+        row_curve = YarnCurve()
 
         if is_closed_row:
-            path_faces = _order_closed_row(face_list, spiral_start_ref)
-            # START OF DISORDERED ROWS FIX
-            disordered = False
-            edges_to_faces = {}
-            face_to_col ={}
-            checked_path_faces = []
-            for face_idx, (_col, fid) in enumerate(path_faces):
-                if face_idx + 1 < len(path_faces):
-                    _, next_fid = path_faces[face_idx + 1]
-                else:
-                    _, next_fid = path_faces[0]
-                face1 = f"{STATE.base_mesh}.f[{fid}]"
-                face2 = f"{STATE.base_mesh}.f[{next_fid}]"
-
-                # Get edges of face1
-                edges1 = cmds.polyListComponentConversion(face1, fromFace=True, toEdge=True)
-                edges1 = cmds.ls(edges1, flatten=True)
-                edges2 = cmds.polyListComponentConversion(face2, fromFace=True, toEdge=True)
-                edges2 = cmds.ls(edges2, flatten=True)
-
-                face_to_col[fid] = _col
-                for edge in edges1:
-                    if edge not in edges_to_faces:
-                        edges_to_faces[edge] = [fid]
-                    else:
-                        edges_to_faces[edge].append(fid)
-                
-                #shareEdge = bool(set(edges1) & set(edges2))
-                shared_edges = list(set(edges1) & set(edges2))
-                if shared_edges:
-                    shareEdge = shared_edges[0]
-                    share_Edge_index = int(shareEdge.split('[')[-1].rstrip(']'))
-                    if not (STATE.edge_map[share_Edge_index] != EdgeType.WALE):
-                        checked_path_faces.append(path_faces[face_idx])
-                else:
-                    disordered = True
-            ordered_fids = []
-            each_row_ordrd_fids = []
-            checked_path_faces_REPLACEMENT = []
-            numRowsIndx = -1
-            if disordered:
-                for i in range(len(path_faces)):
-                    _prevRealcol, prevRealFID = path_faces[i]
-                    if prevRealFID in ordered_fids:
-                        continue
-                    ordered_fids.append(prevRealFID)
-                    numRowsIndx += 1
-                    each_row_ordrd_fids.append([])
-                    for i in range(len(path_faces)):
-                        for face_idx, (_col, fid) in enumerate(path_faces):
-                            if face_idx == 0:
-                                continue
-                            
-                            face1 = f"{STATE.base_mesh}.f[{fid}]"
-                            face2 = f"{STATE.base_mesh}.f[{prevRealFID}]"
-
-                            # Get edges of face1
-                            edges1 = cmds.polyListComponentConversion(face1, fromFace=True, toEdge=True)
-                            edges1 = cmds.ls(edges1, flatten=True)
-                            edges2 = cmds.polyListComponentConversion(face2, fromFace=True, toEdge=True)
-                            edges2 = cmds.ls(edges2, flatten=True)
-                            
-                            shared_edges = list(set(edges1) & set(edges2))
-                            if shared_edges:
-                                shareEdge = shared_edges[0]
-                                share_Edge_index = int(shareEdge.split('[')[-1].rstrip(']'))
-                                if(STATE.edge_map[share_Edge_index] != EdgeType.WALE):
-                                    if STATE.edge_map[share_Edge_index] == EdgeType.COURSE:
-                                        if not face1 in face_to_next_row_face:
-                                            face_to_next_row_face[fid] = [prevRealFID]
-                                        else:
-                                            face_to_next_row_face[fid].append(prevRealFID)
-                                elif not fid in ordered_fids:
-                                    checked_path_faces.append(path_faces[face_idx])
-                                    _prevRealcol, prevRealFID = path_faces[face_idx]
-                                    ordered_fids.append(fid)
-                                    each_row_ordrd_fids[numRowsIndx].append(fid)
-            path_faces = checked_path_faces
-            # END OF DISORDERED ROWS FIX
+            path_faces = _order_row_by_wale(face_list, True, spiral_start_ref)
             if path_faces:
                 spiral_start_ref = face_centroids.get(path_faces[0][1], spiral_start_ref)
             _append_row_points(
                 row_idx,
                 path_faces,
-                spiral_curve,
+                row_curve,
                 closed_row=True,
-                per_face_callback=_on_face_processed_spiral,
+                incoming_anchor=None,
+                per_face_callback=_on_face_processed_row,
+            )
+            _materialize_curve(
+                row_curve,
+                row_idx,
+                closed=True,
+                curve_name=f"yarn_row_{row_idx:04d}",
+                tube_name=f"yarn_tube_row_{row_idx:04d}",
             )
         else:
-            path_faces = list(face_list)
+            path_faces = _order_row_by_wale(face_list, False)
             if open_row_count % 2 == 1:
                 path_faces.reverse()
             _append_row_points(
                 row_idx,
                 path_faces,
-                open_curve,
-                per_face_callback=_on_face_processed_open,
+                row_curve,
+                incoming_anchor=None,
+                per_face_callback=_on_face_processed_row,
+            )
+            _materialize_curve(
+                row_curve,
+                row_idx,
+                closed=False,
+                curve_name=f"yarn_fabric_row_{row_idx:04d}",
+                tube_name=f"yarn_tube_fabric_row_{row_idx:04d}",
             )
             open_row_count += 1
 
@@ -1665,6 +1647,3 @@ def _generate_rows(
         if processed_rows % row_chunk_size == 0:
             _emit_progress(f"Generating yarn ({processed_faces}/{total_faces} faces)")
             _yield_ui()
-
-    _flush_open_curve(force=True)
-    _flush_spiral_curve(force=True)
