@@ -109,7 +109,7 @@ stitch_name_to_type_map = { "knit": StitchType.KNIT,
 
 PATTERN_PREVIEWS = {
     "stockinette": (
-        "Stockinette",
+        "No Pattern",
         "K K K K\nK K K K\nK K K K",
         "All assigned quad faces become knit stitches."
     ),
@@ -370,7 +370,7 @@ def _build_ui(parent):
         icon = PATTERN_ICONS.get(pattern)
         button_args = {
             "label": title,
-            "style": "iconAndTextVertical" if icon else "textOnly",
+            "style": "iconOnly" if icon else "textOnly",
             "command": lambda *_args, pattern=pattern: _handle_pattern_fill(pattern),
             "enable": False,
             "height": 72,
@@ -439,12 +439,12 @@ def _build_ui(parent):
         changeCommand=lambda value: _handle_mesh_relax_changed(value),
         annotation="When enabled, applies a relaxation pass to the stitch mesh before generating yarn geometry to even out stitch sizing."
     )
-    UI["yarn_relax_cb"] = cmds.checkBox(
-        label="Yarn Level Relaxation",
-        value=True,
-        changeCommand=lambda value: _handle_yarn_relax_changed(value),
-        annotation="When enabled, applies a physics-based relaxation to the yarn geometry for a more realistic drape."
-    )
+    # UI["yarn_relax_cb"] = cmds.checkBox(
+    #     label="Yarn Level Relaxation",
+    #     value=True,
+    #     changeCommand=lambda value: _handle_yarn_relax_changed(value),
+    #     annotation="When enabled, applies a physics-based relaxation to the yarn geometry for a more realistic drape."
+    # )
 
     UI["yarn_radius_slider"] = cmds.floatSliderGrp(
         label="Yarn Radius",

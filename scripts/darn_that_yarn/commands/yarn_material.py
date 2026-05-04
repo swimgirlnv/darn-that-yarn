@@ -75,13 +75,13 @@ def create_yarn_material_with_texture(image_path):
     print(f"Created {shader_name} with texture: {image_path}")
 
 
-
 def assign_material_to_yarn_by_name(material_name):
-    # Get selection
-    selection = STATE.yarn_mesh
+    # Find all objects containing 'yarn_tube' in their name
+    all_objects = cmds.ls(type="transform")
+    targets = [obj for obj in all_objects if "yarn_tube" in obj]
 
-    if not selection:
-        cmds.warning("No objects selected.")
+    if not targets:
+        cmds.warning("No objects found with 'yarn_tube' in the name.")
         return
 
     # Check material exists
@@ -101,12 +101,16 @@ def assign_material_to_yarn_by_name(material_name):
             empty=True,
             name=material_name + "SG"
         )
-        cmds.connectAttr(material_name + ".outColor", shading_group + ".surfaceShader", force=True)
+        cmds.connectAttr(
+            material_name + ".outColor",
+            shading_group + ".surfaceShader",
+            force=True
+        )
 
-    # Assign to selection
-    cmds.sets(selection, edit=True, forceElement=shading_group)
+    # Assign material to all matching objects
+    cmds.sets(targets, edit=True, forceElement=shading_group)
 
-    print(f"Assigned material '{material_name}' to {len(selection)} object(s).")
+    print(f"Assigned material '{material_name}' to {len(targets)} object(s).")
 
 def set_texture_image(node_name, image_path):
     """
@@ -187,38 +191,59 @@ def select_edge_loop_by_id(mesh, edge_id):
 
 
 def clean_yarn_UVs():
-    #get total number of edges
-    num_edges = total_edges(STATE.yarn_mesh)
+    # Find all matching objects
+    all_objects = cmds.ls(type="transform")
+    yarn_objects = [obj for obj in all_objects if "yarn_tube" in obj]
 
+    if not yarn_objects:
+        cmds.warning("No objects found with 'yarn_tube' in the name.")
+        return
 
-    # set normal UV mapping    
-    cmds.polyAutoProjection(STATE.yarn_mesh, planes=6, optimize=2, percentageSpace=0.1)
+    for obj in yarn_objects:
+        try:
+            # get total number of edges
+            num_edges = total_edges(obj)
 
-    #select all edges and sew them
-    cmds.select(f"{STATE.yarn_mesh}.e[*]", replace=True)
-    cmds.polyMapSew() 
+            # set normal UV mapping    
+            cmds.polyAutoProjection(obj, planes=6, optimize=2, percentageSpace=0.1)
 
-    #select long seam
-    select_edge_loop_by_id(STATE.yarn_mesh, 14)
-    # Edge indices you want to select
-    edge_ids = [0, 4, 7, 10, 13, 16, 19, 22, num_edges-17,  num_edges-18, num_edges-20, num_edges-22, num_edges-24, num_edges-26, num_edges-28, num_edges-31]
-    # Resolve to the transform node
-    obj = STATE.yarn_mesh.split('.')[0]
-    # Build edge component strings
-    edges_to_select = ["{}.e[{}]".format(obj, i) for i in edge_ids]
-    # Select the edges
-    cmds.select(edges_to_select, add=True)
-    cmds.select("{}.e[{}]".format(obj, num_edges-3), deselect=True)
-    cmds.select("{}.e[{}]".format(obj, num_edges-11), deselect=True)
-    cmds.polyMapCut() 
+            # select all edges and sew them
+            cmds.select(f"{obj}.e[*]", replace=True)
+            cmds.polyMapSew()
 
-    cmds.select(STATE.yarn_mesh)
-    faces = cmds.polyListComponentConversion(STATE.yarn_mesh, toFace=True)
-    cmds.select(faces)
-    face_count= get_face_count(STATE.yarn_mesh)
-    mel.eval(f"u3dUnfold -ite 1 -p 0 -bi 1 -tf 1 -ms 1024 -rs 0 {STATE.yarn_mesh}.f[0:{face_count}];")
-    # cmds.u3dUnfold(
-    #     f"{STATE.yarn_mesh}.f[*]",
-    #     ite=1, p=0, bi=1, tf=1, ms=1024, rs=0
-    # )
+            # select long seam
+            select_edge_loop_by_id(obj, 14)
+
+            # Edge indices you want to select
+            edge_ids = [
+                0, 4, 7, 10, 13, 16, 19, 22,
+                num_edges-17, num_edges-18, num_edges-20,
+                num_edges-22, num_edges-24, num_edges-26,
+                num_edges-28, num_edges-31
+            ]
+
+            # Build edge component strings
+            edges_to_select = [f"{obj}.e[{i}]" for i in edge_ids]
+
+            # Select the edges
+            cmds.select(edges_to_select, add=True)
+            cmds.select(f"{obj}.e[{num_edges-3}]", deselect=True)
+            cmds.select(f"{obj}.e[{num_edges-11}]", deselect=True)
+
+            cmds.polyMapCut()
+
+            # Unfold
+            faces = cmds.polyListComponentConversion(obj, toFace=True)
+            cmds.select(faces)
+
+            face_count = get_face_count(obj)
+
+            mel.eval(
+                f"u3dUnfold -ite 1 -p 0 -bi 1 -tf 1 -ms 1024 -rs 0 {obj}.f[0:{face_count}];"
+            )
+
+        except Exception as e:
+            cmds.warning(f"Failed on {obj}: {e}")
+
     STATE.yarn_uvs_clean = True
+    print(f"Processed {len(yarn_objects)} yarn objects.")
