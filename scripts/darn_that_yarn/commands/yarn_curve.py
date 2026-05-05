@@ -1441,6 +1441,93 @@ def _generate_rows(
                 created_nodes.append(curve_node)
         else:
             created_nodes.append(curve_node)
+    face_to_next_row_face ={}
+    def _find_grouped_rows(path_faces):
+        # START OF DISORDERED ROWS FIX
+        disordered = False
+        edges_to_faces = {}
+        face_to_col ={}
+        checked_path_faces = []
+        for face_idx, (_col, fid) in enumerate(path_faces):
+            if face_idx + 1 < len(path_faces):
+                _, next_fid = path_faces[face_idx + 1]
+            else:
+                _, next_fid = path_faces[0]
+            face1 = f"{STATE.base_mesh}.f[{fid}]"
+            face2 = f"{STATE.base_mesh}.f[{next_fid}]"
+
+            # Get edges of face1
+            edges1 = cmds.polyListComponentConversion(face1, fromFace=True, toEdge=True)
+            edges1 = cmds.ls(edges1, flatten=True)
+            edges2 = cmds.polyListComponentConversion(face2, fromFace=True, toEdge=True)
+            edges2 = cmds.ls(edges2, flatten=True)
+
+            face_to_col[fid] = _col
+            for edge in edges1:
+                if edge not in edges_to_faces:
+                    edges_to_faces[edge] = [fid]
+                else:
+                    edges_to_faces[edge].append(fid)
+            
+            #shareEdge = bool(set(edges1) & set(edges2))
+            shared_edges = list(set(edges1) & set(edges2))
+            if shared_edges:
+                shareEdge = shared_edges[0]
+                share_Edge_index = int(shareEdge.split('[')[-1].rstrip(']'))
+                if not (STATE.edge_map[share_Edge_index] != EdgeType.WALE):
+                    checked_path_faces.append(path_faces[face_idx])
+            else:
+                disordered = True
+        ordered_fids = []
+        each_row_ordrd_fids = []
+        checked_path_faces_List = []
+        numRowsIndx = -1
+        if not disordered:
+            return [checked_path_faces]
+        if disordered:
+            for i in range(len(path_faces)):
+                _prevRealcol, prevRealFID = path_faces[i]
+                if len(checked_path_faces) > 0:
+                    checked_path_faces_List.append(checked_path_faces)
+                checked_path_faces = []
+                if prevRealFID in ordered_fids:
+                    continue
+                ordered_fids.append(prevRealFID)
+                numRowsIndx += 1
+                each_row_ordrd_fids.append([])
+                for i in range(len(path_faces)):
+                    for face_idx, (_col, fid) in enumerate(path_faces):
+                        if face_idx == 0:
+                            continue
+                        
+                        face1 = f"{STATE.base_mesh}.f[{fid}]"
+                        face2 = f"{STATE.base_mesh}.f[{prevRealFID}]"
+
+                        # Get edges of face1
+                        edges1 = cmds.polyListComponentConversion(face1, fromFace=True, toEdge=True)
+                        edges1 = cmds.ls(edges1, flatten=True)
+                        edges2 = cmds.polyListComponentConversion(face2, fromFace=True, toEdge=True)
+                        edges2 = cmds.ls(edges2, flatten=True)
+                        
+                        shared_edges = list(set(edges1) & set(edges2))
+                        if shared_edges:
+                            shareEdge = shared_edges[0]
+                            share_Edge_index = int(shareEdge.split('[')[-1].rstrip(']'))
+                            if(STATE.edge_map[share_Edge_index] != EdgeType.WALE):
+                                if STATE.edge_map[share_Edge_index] == EdgeType.COURSE:
+                                    if not face1 in face_to_next_row_face:
+                                        face_to_next_row_face[fid] = [prevRealFID]
+                                    else:
+                                        face_to_next_row_face[fid].append(prevRealFID)
+                            elif not fid in ordered_fids:
+                                checked_path_faces.append(path_faces[face_idx])
+                                _prevRealcol, prevRealFID = path_faces[face_idx]
+                                ordered_fids.append(fid)
+                                each_row_ordrd_fids[numRowsIndx].append(fid)
+        if len(checked_path_faces) > 0:
+            checked_path_faces_List.append(checked_path_faces)
+        return checked_path_faces_List
+        # END OF DISORDERED ROWS FIX
 
     def _append_row_points(
         row_idx: int,
@@ -1606,23 +1693,25 @@ def _generate_rows(
 
         if is_closed_row:
             path_faces = _order_row_by_wale(face_list, True, spiral_start_ref)
-            if path_faces:
-                spiral_start_ref = face_centroids.get(path_faces[0][1], spiral_start_ref)
-            _append_row_points(
-                row_idx,
-                path_faces,
-                row_curve,
-                closed_row=True,
-                incoming_anchor=None,
-                per_face_callback=_on_face_processed_row,
-            )
-            _materialize_curve(
-                row_curve,
-                row_idx,
-                closed=True,
-                curve_name=f"yarn_row_{row_idx:04d}",
-                tube_name=f"yarn_tube_row_{row_idx:04d}",
-            )
+            path_faces_list = _find_grouped_rows(path_faces)
+            for pf in path_faces_list:
+                if pf:
+                    spiral_start_ref = face_centroids.get(pf[0][1], spiral_start_ref)
+                _append_row_points(
+                    row_idx,
+                    pf,
+                    row_curve,
+                    closed_row=True,
+                    incoming_anchor=None,
+                    per_face_callback=_on_face_processed_row,
+                )
+                _materialize_curve(
+                    row_curve,
+                    row_idx,
+                    closed=True,
+                    curve_name=f"yarn_row_{row_idx:04d}",
+                    tube_name=f"yarn_tube_row_{row_idx:04d}",
+                )
         else:
             path_faces = _order_row_by_wale(face_list, False)
             if open_row_count % 2 == 1:
