@@ -411,9 +411,9 @@ def _build_ui(parent):
         label="Tessellation Level",
         field=True,
         minValue=1,
-        maxValue=20,
+        maxValue=3,
         fieldMinValue=1,
-        fieldMaxValue=100,
+        fieldMaxValue=10,
         value=1
     )
 
