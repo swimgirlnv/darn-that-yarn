@@ -21,7 +21,7 @@ through offline relaxation.
 
 Base Mesh → Course/Wale Labeling → Stitch Mesh Tessellation
 → Stitch Pattern Authoring → Mesh-Based Relaxation
-→ Yarn Curve Generation → Yarn-Level Relaxation → Final Knit Mesh
+→ Yarn Curve Generation → Final Knit Mesh
 
 ## Features
 
@@ -32,18 +32,17 @@ Base Mesh → Course/Wale Labeling → Stitch Mesh Tessellation
 - **Tessellation control** to set stitch density (number of knit rows)
 - **Mesh-based relaxation** for physically plausible stitch distribution
 - **Yarn curve generation** producing a continuous spline through the full garment
-- **Yarn-level relaxation** for realistic final yarn rest shape (optional, computationally intensive)
 - **Viewport preview** with color-coded rows, stitch types, and knit direction
 
 ## Usage
 
 ### Basic Workflow
 
-1. Create or load a quad-dominant polygon mesh in Maya representing the garment shape
+1. Create or load a quad only polygon mesh in Maya representing the garment shape
 2. Select the mesh and open the plugin via **Darn that Yarn!** in the Maya menu bar
 3. Select each horizontal edge loop and click **Set Course Edge Loop** — repeat working
    down the garment
-4. Optionally assign stitch types per face, flip row directions, or apply ribbing patterns
+4. Optionally assign stitch types per face, or apply ribbing patterns
 5. Set tessellation level and click **Tessellate**
 6. Enable relaxation options as desired and click **Generate Knit Mesh**
 7. Export or render the resulting yarn-level mesh
@@ -55,19 +54,16 @@ Base Mesh → Course/Wale Labeling → Stitch Mesh Tessellation
 | **Set Course Edge Loop** | Marks selected edges as course (row) edges; adjacent edges become wale edges automatically |
 | **Reset Edge Loop** | Clears course assignment from selected edges |
 | **Set Stitch Type** | Assigns a stitch type to the selected face(s) |
-| **Flip Row Direction** | Reverses wale direction for all faces in a row |
 | **Apply Ribbing Pattern** | Applies alternating knit/purl to a contiguous selection of faces |
 | **Tessellation Level** | Controls how many stitch rows each base mesh row subdivides into |
 | **Tessellate** | Subdivides the stitch mesh according to the tessellation level |
 | **Stitch Mesh Relaxation** | Toggles mesh-based relaxation before yarn generation |
-| **Yarn Level Relaxation** | Toggles yarn-level relaxation after yarn generation |
 | **Generate Knit Mesh** | Runs the full pipeline to produce the final yarn mesh |
 | **Reset Stitch Mesh** | Clears all assignments and restores the original base mesh |
 
 ### Base Mesh Guidelines
 
-- Prefer clean, quad-dominant topology with consistent horizontal edge loops
-- Pentagon faces are supported for increase/decrease stitches; triangles are not handled
+- Require clean, quad only topology with consistent horizontal edge loops
 - Edge loops should run in the intended course (row) direction of the knit
 
 ## Requirements
@@ -80,7 +76,7 @@ Base Mesh → Course/Wale Labeling → Stitch Mesh Tessellation
 
 The plugin is implemented as a Maya plugin with a Python UI layer. The pipeline follows
 the six stages from Yuksel et al.: labeling → stitch mesh tessellation → pattern authoring
-→ mesh-based relaxation → yarn generation → yarn-level relaxation.
+→ mesh-based relaxation → yarn generation.
 
 Stitch mesh and yarn curve data persist within a session for iterative editing but are not
 currently saved or exported between sessions.
