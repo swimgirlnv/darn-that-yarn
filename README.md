@@ -1,4 +1,11 @@
 # darn-that-yarn
+
+## Setup Instructions
+
+Instructions for setting up the plugin can be found in scripts/userSetup.py.
+The actual plugin can be loaded in Maya using the file plug-ins/darn_that_yarn.py
+
+
 ## Alpha Version
 [<img width="1270" height="711" alt="alpha-demo" src="https://github.com/user-attachments/assets/03f8a0ea-6eba-42ab-8461-5cef61dcae6d" />](https://drive.google.com/file/d/1h9OSULZsN4nW3lyelUBjcsg1Rr8BpaoK/view?usp=sharing)
 ## Beta Version
